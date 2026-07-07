@@ -45,6 +45,16 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    Core/Src/oled.c
+    Core/Src/keyboard.c
+    Core/Src/editor.c
+    Core/Src/pwm_dds.c
+    Core/Src/transmitter.c
+    Core/Src/fsk4_encoder.c
+    Core/Src/fsk16_encoder.c
+    Core/Src/receiver.c
+    Core/Src/fsk4_decoder.c
+    Core/Src/flash_store.c
 )
 
 # Add include paths

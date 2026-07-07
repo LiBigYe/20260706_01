@@ -23,6 +23,7 @@
 
 #include "receiver.h"
 #include "fsk4_decoder.h"
+#include "flash_store.h"
 #include <string.h>
 
 /* ========================================================================== */
@@ -278,13 +279,13 @@ static void rx_enter_listening(void)
     memset(rx_tone_ring, 0, sizeof(rx_tone_ring));
     memset(rx_symbols, 0, sizeof(rx_symbols));
 }
-
+/*
 static void rx_enter_error(void)
 {
     rx_state     = RX_STATE_ERROR;
     rx_done_flag = 1;
 }
-
+*/
 static void rx_enter_done(void)
 {
     rx_state     = RX_STATE_DONE;
@@ -293,6 +294,9 @@ static void rx_enter_done(void)
     memcpy(rx_display_msg, rx_message, rx_msg_length + 1);
     rx_display_len = rx_msg_length;
     rx_scroll_line = 0;
+
+    /* 非易失存储: 自动保存到内部 Flash (断电不丢失) */
+    FlashStore_SaveMessage(rx_message, rx_msg_length);
 }
 
 /**

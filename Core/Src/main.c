@@ -19,6 +19,7 @@
 #include "pwm_dds.h"
 #include "transmitter.h"
 #include "receiver.h"
+#include "flash_store.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -170,6 +171,7 @@ int main(void)
 
   PWM_DDS_Init(&htim1);
   TX_Init();
+  FlashStore_Init();
   RX_Init();
 
   /* 首次启动 TIM3 (transmitter.c 的 TX_ClearDone 会停止它) */
@@ -189,110 +191,292 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+  /* ── RX 子模式 (在半双工 HM_RX 内部) ── */
+  #define LS_LISTENING    0
+  #define LS_BROWSE_LIST  1
+  #define LS_BROWSE_VIEW  2
+
+  uint8_t  ls_mode        = LS_LISTENING; /* RX 子模式 */
+  uint8_t  browse_cursor  = 0;            /* 列表光标 */
+  uint8_t  view_scroll    = 0;            /* 查看滚动 */
+  uint8_t  last_key_mode  = 0;
+  uint8_t  last_key_del   = 0;
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
 
-    /* ── 关机: POWER 键 → Standby ── */
     uint8_t key = Keyboard_Scan();
 
-    /* ── RX 模式 ── */
+    /* ── KEY_MODE / KEY_DEL 边沿检测 (防重复触发) ── */
+    uint8_t key_mode_now  = (key == KEY_MODE) ? 1 : 0;
+    uint8_t key_mode_edge = key_mode_now && !last_key_mode;
+    last_key_mode = key_mode_now;
+
+    /* ═══════════════════════════════════════════════════════ */
+    /*  RX 模式                                                */
+    /* ═══════════════════════════════════════════════════════ */
     if (hm_mode == HM_RX) {
-        /* ── 接收完成 → 显示 + 2s → 重新监听 ── */
-        if (RX_IsDone()) {
-            RX_ClearDone();
-            HAL_Delay(2000);
-            RX_Start();
-            last_tick = 0;
+
+        /* ── 关机 ── */
+        if (key == KEY_POWER) {
+            OLED_Clear(); OLED_Refresh();
+            HAL_PWR_EnterSTANDBYMode();
+        }
+
+        /* ── KEY_SEND → 进入编辑发信 ── */
+        if (key == KEY_SEND) {
+            ls_mode = LS_LISTENING;  /* 退出浏览 */
+            HM_SwitchToTx();
             continue;
         }
 
-        /* ── 键盘处理 ── */
-        if (key != KEY_NONE) {
-            if (key == KEY_POWER) {
-                OLED_Clear(); OLED_Refresh();
-                HAL_PWR_EnterSTANDBYMode();
-            }
-            else if (key == KEY_SEND) {
-                HM_SwitchToTx();
-                continue;
-            }
-            else if (key == KEY_MODE || key == KEY_1 || key == KEY_2 ||
-                     key == KEY_3 || key == KEY_4 || key == KEY_5 ||
-                     key == KEY_6 || key == KEY_7 || key == KEY_8 ||
-                     key == KEY_9 || key == KEY_0) {
-                /* 在 RX 模式下按 T9 键 → 进入编辑模式 (准备发信) */
-                hm_mode = HM_TX_EDIT;
-                Editor_Init();
-                Editor_HandleKey(key);
-                Editor_SetTxStatus("Tx Ready");
-                continue;
-            }
-            else {
-                /* 上/下翻页 */
-                /* handled in RX display logic below */
+        /* ── T9 键 (数字/字母) → 进入编辑发信 ── */
+        if (key >= KEY_0 && key <= KEY_9) {
+            ls_mode = LS_LISTENING;
+            hm_mode = HM_TX_EDIT;
+            Editor_Init();
+            Editor_HandleKey(key);
+            Editor_SetTxStatus("Tx Ready");
+            continue;
+        }
+
+        /* ── KEY_MODE: 循环 RX 子模式 ── */
+        if (key_mode_edge) {
+            if (ls_mode == LS_LISTENING) {
+                ls_mode       = LS_BROWSE_LIST;
+                browse_cursor = 0;
+            } else if (ls_mode == LS_BROWSE_LIST) {
+                ls_mode = LS_LISTENING;
+            } else if (ls_mode == LS_BROWSE_VIEW) {
+                ls_mode     = LS_BROWSE_LIST;
+                view_scroll = 0;
             }
         }
 
-        /* ── RX 显示 ── */
-        {
-            const char *msg    = RX_GetDisplayMessage();
-            uint8_t    mlen    = RX_GetDisplayLength();
-            uint8_t    line_start[50], line_len[50], total_lines = 0;
-            uint16_t   pos = 0;
-
-            while (pos < mlen) {
-                line_start[total_lines] = (uint8_t)pos;
-                uint8_t l = 0;
-                while (pos + l < mlen && msg[pos + l] != '\n' && l < 21) l++;
-                line_len[total_lines] = l;
-                total_lines++;
-                pos += l;
-                if (pos < mlen && msg[pos] == '\n') pos++;
+        /* ── 接收完成 ── */
+        if (RX_IsDone()) {
+            const char *rx_msg = RX_GetMessage();
+            uint8_t    rx_len  = RX_GetMessageLength();
+            /* 计算行数 */
+            uint8_t rls[50], rll[50], rtl = 0; uint16_t rp = 0;
+            while (rp < rx_len) {
+                rls[rtl] = (uint8_t)rp; uint8_t rl = 0;
+                while (rp + rl < rx_len && rx_msg[rp + rl] != '\n' && rl < DISP_COLS) rl++;
+                rll[rtl] = rl; rtl++; rp += rl;
+                if (rp < rx_len && rx_msg[rp] == '\n') rp++;
             }
-            if (mlen > 0 && msg[mlen - 1] == '\n') {
-                line_start[total_lines] = mlen; line_len[total_lines] = 0; total_lines++;
-            }
-            if (total_lines == 0) { total_lines = 1; line_start[0]=0; line_len[0]=0; }
+            if (rx_len > 0 && rx_msg[rx_len - 1] == '\n')
+                { rls[rtl] = rx_len; rll[rtl] = 0; rtl++; }
+            if (rtl == 0) { rtl = 1; rls[0] = 0; rll[0] = 0; }
 
-            /* 键盘翻行 */
-            if (key == KEY_LEFT)  RX_ScrollWrapUp(total_lines);
-            if (key == KEY_RIGHT) RX_ScrollDown(total_lines);
-
-            uint32_t tick = HAL_GetTick();
-            uint8_t  cs   = RX_GetScrollLine();
-            static uint8_t lcs = 0xFF;
-            if ((tick - last_tick) >= 200 || cs != lcs) {
-                last_tick = tick; lcs = cs;
+            if (ls_mode == LS_LISTENING) {
                 OLED_Clear();
-
-                uint8_t sl = cs;
-                if (total_lines > VISIBLE_ROWS && sl + VISIBLE_ROWS > total_lines)
-                    sl = total_lines - VISIBLE_ROWS;
-                if (total_lines <= VISIBLE_ROWS) sl = 0;
-
+                uint8_t sl = 0;
+                if (rtl > VISIBLE_ROWS) sl = rtl - VISIBLE_ROWS;
                 for (uint8_t row = 0; row < VISIBLE_ROWS; row++) {
-                    uint8_t li = sl + row;
-                    if (li >= total_lines) break;
-                    uint8_t py = row * 8;
-                    for (uint8_t c = 0; c < line_len[li]; c++)
-                        OLED_ShowChar(c * 6, py, msg[line_start[li] + c]);
+                    uint8_t li = sl + row; if (li >= rtl) break;
+                    uint8_t py = row * FONT_HEIGHT;
+                    for (uint8_t c = 0; c < rll[li]; c++)
+                        OLED_ShowChar(c * FONT_WIDTH, py, rx_msg[rls[li] + c]);
                 }
+                char cbuf[10];
+                snprintf(cbuf, sizeof(cbuf), "Count:%d", rx_len);
+                OLED_ShowString(0, 7 * FONT_HEIGHT, cbuf);
+                const char *done_status = "Rx Complete";
+                OLED_ShowString(OLED_WIDTH - (uint8_t)strlen(done_status) * FONT_WIDTH,
+                                7 * FONT_HEIGHT, done_status);
+                OLED_Refresh();
+                HAL_Delay(2000);
+                RX_ClearDone();
+                RX_Start();
+            } else {
+                /* 浏览模式: 消息已在 rx_enter_done 中自动存入 Flash, 直接重启接收 */
+                RX_ClearDone();
+                RX_Start();
+            }
+            last_tick = 0;
+        }
 
+        /* ── 定时刷新 ── */
+        uint32_t tick = HAL_GetTick();
+        uint8_t  refresh = 0;
+        if ((tick - last_tick) >= 200) refresh = 1;
+
+        /* ═══════════════════════════════════════════════════ */
+        /*  LS_LISTENING: 显示上次接收消息                       */
+        /* ═══════════════════════════════════════════════════ */
+        if (ls_mode == LS_LISTENING) {
+            const char *msg = RX_GetDisplayMessage();
+            uint8_t mlen = RX_GetDisplayLength();
+            uint8_t ls[50], ll[50], tl = 0; uint16_t p = 0;
+            while (p < mlen) {
+                ls[tl] = (uint8_t)p; uint8_t l = 0;
+                while (p + l < mlen && msg[p + l] != '\n' && l < DISP_COLS) l++;
+                ll[tl] = l; tl++; p += l;
+                if (p < mlen && msg[p] == '\n') p++;
+            }
+            if (mlen > 0 && msg[mlen - 1] == '\n')
+                { ls[tl] = mlen; ll[tl] = 0; tl++; }
+            if (tl == 0) { tl = 1; ls[0] = 0; ll[0] = 0; }
+
+            if (key == KEY_LEFT)  RX_ScrollWrapUp(tl);
+            if (key == KEY_RIGHT) RX_ScrollDown(tl);
+
+            uint8_t cs = RX_GetScrollLine();
+            static uint8_t lcs = 0xFF;
+            if (refresh || cs != lcs) {
+                lcs = cs;
+                OLED_Clear();
+                uint8_t sl = cs;
+                if (tl > VISIBLE_ROWS && sl + VISIBLE_ROWS > tl)
+                    sl = tl - VISIBLE_ROWS;
+                if (tl <= VISIBLE_ROWS) sl = 0;
+                for (uint8_t row = 0; row < VISIBLE_ROWS; row++) {
+                    uint8_t li = sl + row; if (li >= tl) break;
+                    uint8_t py = row * FONT_HEIGHT;
+                    for (uint8_t c = 0; c < ll[li]; c++)
+                        OLED_ShowChar(c * FONT_WIDTH, py, msg[ls[li] + c]);
+                }
                 const char *st = RX_GetStatusString();
                 char cbuf[10];
                 snprintf(cbuf, sizeof(cbuf), "Count:%d", mlen);
-                OLED_ShowString(0, 7*8, cbuf);
-                OLED_ShowString(128 - (uint8_t)strlen(st)*6, 7*8, st);
+                OLED_ShowString(0, 7 * FONT_HEIGHT, cbuf);
+                OLED_ShowString(OLED_WIDTH - (uint8_t)strlen(st) * FONT_WIDTH,
+                                7 * FONT_HEIGHT, st);
                 OLED_Refresh();
             }
         }
+
+        /* ═══════════════════════════════════════════════════ */
+        /*  LS_BROWSE_LIST: 已存储消息列表                       */
+        /* ═══════════════════════════════════════════════════ */
+        else if (ls_mode == LS_BROWSE_LIST) {
+            uint8_t count = FlashStore_GetCount();
+
+            uint8_t nav_changed = 0;
+            if (key == KEY_LEFT || key == KEY_RIGHT) {
+                if (count > 0) {
+                    if (key == KEY_RIGHT) {
+                        browse_cursor++;
+                        if (browse_cursor >= count) browse_cursor = 0;
+                    } else {
+                        if (browse_cursor == 0) browse_cursor = count - 1;
+                        else browse_cursor--;
+                    }
+                    nav_changed = 1;
+                }
+            }
+
+            uint8_t key_del_now  = (key == KEY_DELETE) ? 1 : 0;
+            uint8_t key_del_edge = key_del_now && !last_key_del;
+            last_key_del = key_del_now;
+            if (key_del_edge && count > 0) {
+                FlashStore_DeleteMessage(browse_cursor);
+                count = FlashStore_GetCount();
+                if (count > 0 && browse_cursor >= count)
+                    browse_cursor = count - 1;
+            }
+
+            /* 数字键 0~9 → 查看消息 */
+            if (key >= KEY_0 && key <= KEY_9 && count > 0) {
+                ls_mode     = LS_BROWSE_VIEW;
+                view_scroll = 0;
+            }
+
+            if (refresh || nav_changed) {
+                OLED_Clear();
+                char hdr[22];
+                snprintf(hdr, sizeof(hdr), "Stored Msgs (%d)", count);
+                OLED_ShowString(0, 0, hdr);
+                if (count == 0) {
+                    OLED_ShowString(0, 2 * FONT_HEIGHT, "(no messages)");
+                } else {
+                    for (uint8_t i = 0; i < count && i < 5; i++) {
+                        const FlashStore_MsgSlot *slot = FlashStore_GetMessage(i);
+                        uint8_t ry = (uint8_t)(1 + i) * FONT_HEIGHT;
+                        char pr[4];
+                        snprintf(pr, sizeof(pr), "%c%d:",
+                                 (i == browse_cursor) ? '>' : ' ', i + 1);
+                        OLED_ShowString(0, ry, pr);
+                        if (slot && slot->valid) {
+                            char preview[19]; uint8_t plen = slot->length;
+                            if (plen > 14) plen = 14;
+                            memcpy(preview, slot->data, plen);
+                            if (slot->length > 14) { memcpy(preview + 14, "...", 3); plen += 3; }
+                            preview[plen] = '\0';
+                            OLED_ShowString(4 * FONT_WIDTH, ry, preview);
+                        }
+                    }
+                }
+                OLED_ShowString(0, 7 * FONT_HEIGHT, "[Mode]Back [Del]Erase");
+                OLED_Refresh();
+            }
+        }
+
+        /* ═══════════════════════════════════════════════════ */
+        /*  LS_BROWSE_VIEW: 查看单条消息                         */
+        /* ═══════════════════════════════════════════════════ */
+        else if (ls_mode == LS_BROWSE_VIEW) {
+            const FlashStore_MsgSlot *slot = FlashStore_GetMessage(browse_cursor);
+            if (!slot || !slot->valid) {
+                ls_mode = LS_BROWSE_LIST; view_scroll = 0;
+            } else {
+                uint8_t vls[50], vll[50], vtl = 0; uint16_t vp = 0;
+                while (vp < slot->length) {
+                    vls[vtl] = (uint8_t)vp; uint8_t vl = 0;
+                    while (vp + vl < slot->length && slot->data[vp + vl] != '\n'
+                           && vl < DISP_COLS) vl++;
+                    vll[vtl] = vl; vtl++; vp += vl;
+                    if (vp < slot->length && slot->data[vp] == '\n') vp++;
+                }
+                if (slot->length > 0 && slot->data[slot->length - 1] == '\n')
+                    { vls[vtl] = slot->length; vll[vtl] = 0; vtl++; }
+                if (vtl == 0) { vtl = 1; vls[0] = 0; vll[0] = 0; }
+
+                if (key == KEY_LEFT || key == KEY_RIGHT) {
+                    if (vtl > VISIBLE_ROWS) {
+                        if (key == KEY_RIGHT) {
+                            if (view_scroll < vtl - VISIBLE_ROWS) view_scroll++;
+                        } else {
+                            if (view_scroll > 0) view_scroll--;
+                        }
+                    }
+                }
+
+                uint8_t key_del_v = (key == KEY_DELETE) ? 1 : 0;
+                if (key_del_v) {
+                    ls_mode = LS_BROWSE_LIST; view_scroll = 0;
+                }
+
+                if (refresh || key == KEY_LEFT || key == KEY_RIGHT) {
+                    OLED_Clear();
+                    char vhdr[16];
+                    snprintf(vhdr, sizeof(vhdr), "Msg %d/%d",
+                             browse_cursor + 1, FlashStore_GetCount());
+                    OLED_ShowString(0, 0, vhdr);
+                    for (uint8_t row = 0; row < VISIBLE_ROWS; row++) {
+                        uint8_t li = view_scroll + row; if (li >= vtl) break;
+                        uint8_t py = (uint8_t)(1 + row) * FONT_HEIGHT;
+                        for (uint8_t c = 0; c < vll[li]; c++)
+                            OLED_ShowChar(c * FONT_WIDTH, py, slot->data[vls[li] + c]);
+                    }
+                    OLED_ShowString(0, 7 * FONT_HEIGHT, "[Mode]List [L/R]Scroll");
+                    OLED_Refresh();
+                }
+            }
+        }
+
+        if (refresh) last_tick = tick;
         HAL_Delay(10);
     }
 
-    /* ── TX 编辑模式 ── */
+    /* ═══════════════════════════════════════════════════════ */
+    /*  TX 编辑模式                                             */
+    /* ═══════════════════════════════════════════════════════ */
     else if (hm_mode == HM_TX_EDIT) {
         if (key != KEY_NONE) {
             if (key == KEY_POWER) {
@@ -318,14 +502,16 @@ int main(void)
         HAL_Delay(10);
     }
 
-    /* ── TX 发送中 ── */
+    /* ═══════════════════════════════════════════════════════ */
+    /*  TX 发送中                                               */
+    /* ═══════════════════════════════════════════════════════ */
     else if (hm_mode == HM_TX_BUSY) {
         if (TX_IsDone()) {
             Editor_SetTxStatus("Tx Complete");
             Editor_UpdateDisplay();
             HAL_Delay(1500);
-            /* 发完自动回 RX */
             HM_SwitchToRx();
+            ls_mode = LS_LISTENING;
             last_tick = 0;
             continue;
         }
@@ -668,7 +854,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, KB_ROW0_Pin|KB_ROW1_Pin|KB_ROW2_Pin|KB_ROW3_Pin, GPIO_PIN_RESET);
