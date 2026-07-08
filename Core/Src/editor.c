@@ -126,7 +126,7 @@ void Editor_HandleKey(uint8_t key) {
         case KEY_DELETE: BufBackspace(); break;
         case KEY_LEFT: if (ed.cur > 0) { ed.cur--; ed.dirty = 1; } break;
         case KEY_RIGHT: if (ed.cur < ed.len) { ed.cur++; ed.dirty = 1; } break;
-        case KEY_MODE: NextMode(); break;
+        case KEY_FN: NextMode(); break;
         case KEY_SEND: if (ed.len > 0) ed.send_requested = 1; break;
         default: break;
     }
@@ -234,6 +234,7 @@ void Editor_UpdateDisplay(void) {
 
 const char* Editor_GetBuffer(void) { return ed.buf; }
 uint8_t Editor_GetLength(void) { return ed.len; }
+uint8_t Editor_IsCursorAtEnd(void) { return (ed.cur >= ed.len) ? 1 : 0; }
 uint8_t Editor_IsSendRequested(void) { return ed.send_requested; }
 void Editor_ClearSendRequest(void) { ed.send_requested = 0; }
 

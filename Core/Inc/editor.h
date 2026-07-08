@@ -22,6 +22,7 @@ void      Editor_Tick(void);
 void      Editor_UpdateDisplay(void);
 const char* Editor_GetBuffer(void);
 uint8_t     Editor_GetLength(void);
+uint8_t     Editor_IsCursorAtEnd(void);   /* 光标在末尾悬空 → 1 */
 uint8_t     Editor_IsSendRequested(void);
 void        Editor_ClearSendRequest(void);
 void        Editor_SetTxStatus(const char *status);

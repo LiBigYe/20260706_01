@@ -61,22 +61,22 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define LED_Pin GPIO_PIN_13
 #define LED_GPIO_Port GPIOC
-#define KB_ROW0_Pin GPIO_PIN_1
+#define KB_ROW0_Pin GPIO_PIN_0
 #define KB_ROW0_GPIO_Port GPIOA
-#define KB_ROW1_Pin GPIO_PIN_2
+#define KB_ROW1_Pin GPIO_PIN_1
 #define KB_ROW1_GPIO_Port GPIOA
-#define KB_ROW2_Pin GPIO_PIN_3
+#define KB_ROW2_Pin GPIO_PIN_2
 #define KB_ROW2_GPIO_Port GPIOA
-#define KB_ROW3_Pin GPIO_PIN_4
+#define KB_ROW3_Pin GPIO_PIN_3
 #define KB_ROW3_GPIO_Port GPIOA
-#define KB_COL0_Pin GPIO_PIN_5
+#define KB_COL0_Pin GPIO_PIN_4
 #define KB_COL0_GPIO_Port GPIOA
-#define KB_COL1_Pin GPIO_PIN_6
+#define KB_COL1_Pin GPIO_PIN_5
 #define KB_COL1_GPIO_Port GPIOA
-#define KB_COL2_Pin GPIO_PIN_7
+#define KB_COL2_Pin GPIO_PIN_6
 #define KB_COL2_GPIO_Port GPIOA
-#define KB_COL3_Pin GPIO_PIN_3
-#define KB_COL3_GPIO_Port GPIOB
+#define KB_COL3_Pin GPIO_PIN_7
+#define KB_COL3_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 

@@ -229,6 +229,9 @@ void OLED_Init(I2C_HandleTypeDef *hi2c)
     OLED_Clear();
     OLED_Refresh();
 
+    /* Vcc 稳定后必须延时 100ms, 再开显示 (SSD1306 手册强制要求) */
+    HAL_Delay(100);
+
     /* Display ON */
     OLED_WriteCmd(0xAF);
 }

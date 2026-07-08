@@ -74,6 +74,15 @@ STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB)
 
 ## 六、变更记录
 
+### 2026-07-08 (CubeMX 重生成后修复)
+
+**GPIO 重分配**: 键盘矩阵改为全部 GPIOA (PA0~PA7, 与单工一致):
+- keyboard.c 移除 `col_ports[4]`，恢复单 `COL_PORT` 宏
+- keyboard.h 注释更新为 PA0~PA3 rows, PA4~PA7 cols
+- 修复 LED 初始态 `GPIO_PIN_RESET` → `GPIO_PIN_SET`
+- 添加 `HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1)` (PA0 兼作 WKUP)
+- 清理 receiver.c `rx_enter_error` 死代码注释
+
 ### 2026-07-07
 
 **从单工合并修复**:

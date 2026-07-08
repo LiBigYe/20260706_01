@@ -279,13 +279,12 @@ static void rx_enter_listening(void)
     memset(rx_tone_ring, 0, sizeof(rx_tone_ring));
     memset(rx_symbols, 0, sizeof(rx_symbols));
 }
-/*
 static void rx_enter_error(void)
 {
     rx_state     = RX_STATE_ERROR;
     rx_done_flag = 1;
 }
-*/
+
 static void rx_enter_done(void)
 {
     rx_state     = RX_STATE_DONE;

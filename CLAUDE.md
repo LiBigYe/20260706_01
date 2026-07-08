@@ -22,10 +22,8 @@
 
 | 功能 | 引脚 | 模式 | 说明 |
 |------|------|------|------|
-| POWER/WKUP | PA0 | Input PD | 独立按键→VDD, 按下=高唤醒 |
-| KB_ROW0~3 | PA1~PA4 | Output PP | 矩阵键盘行扫描 |
-| KB_COL0~2 | PA5~PA7 | Input PU | 矩阵键盘列读取 |
-| KB_COL3 | PB3 | Input PU | 矩阵键盘列读取 |
+| KB_ROW0~3 | PA0~PA3 | Output PP | 矩阵键盘行扫描 |
+| KB_COL0~3 | PA4~PA7 | Input PU | 矩阵键盘列读取 |
 | PWM 音频输出 | PA8 | AF1 PP | TIM1_CH1, 48.83kHz → RC 低通 |
 | 音频输入 | PB0 | Analog | ADC1_IN8 |
 | OLED SCL | PB6 | AF4 OD | I2C1 400kHz |
@@ -49,15 +47,19 @@
 
 ```
 上电 → HM_RX (默认接收)
-         │ KEY_SEND / T9键 → HM_TX_EDIT (编辑)
-         │              │ KEY_SEND → HM_TX_BUSY (发送)
-         │              │              │ TX done → HM_RX
-         │              │ KEY_MODE/数字 → 留在编辑模式
-         │ KEY_MODE → 循环 RX 子模式:
-         │   LS_LISTENING → LS_BROWSE_LIST → 回到 LS_LISTENING
-         │ KEY_LEFT/RIGHT → 浏览列表导航 / 滚动查看
+         │ KEY_FN → HM_TX_EDIT
+         │ T9键 → HM_TX_EDIT
+         │ KEY_SEND → 浏览已存储消息 (LS_BROWSE_LIST)
+         │   ├─ LEFT/RIGHT → 选择消息
+         │   ├─ 数字键 → 查看消息 (LS_BROWSE_VIEW)
+         │   ├─ DELETE → 删除选中
+         │   └─ KEY_FN → 退出浏览 (LS_LISTENING)
          │
-         POWER键 → Standby (PA0 WKUP唤醒)
+         HM_TX_EDIT:
+         │ KEY_SEND → HM_TX_BUSY → done → HM_TX_EDIT (保留编辑器内容)
+         │ KEY_FN → HM_RX
+         │ "rx" + KEY_RIGHT → HM_RX (快速切回收信)
+         │
 
 切换时: RX↔TX 互斥启动/停止 ADC+DMA+TIM2 / TIM1+TIM3
 ```
@@ -103,15 +105,25 @@ Words 54-66: 消息槽位 4
 在 rx_enter_done 中自动保存 (接收完成且校验通过后).
 循环缓冲: 满 5 条时淘汰最旧 (slot 0).
 
-**UI 操作 (RX 子模式)**:
+**UI 操作**:
 
-| 按键 | LS_LISTENING | LS_BROWSE_LIST | LS_BROWSE_VIEW |
-|------|-------------|---------------|---------------|
-| MODE | 进入浏览列表 | 返回监听 | 返回列表 |
-| LEFT/RIGHT | 滚动当前消息 | 选择消息 | 滚动内容 |
-| 数字键 0~9 | → 发送编辑 | 查看选中消息 | — |
-| DELETE | — | 删除选中(边沿) | 返回列表 |
-| SEND | → 发送编辑 | → 发送编辑 | → 发送编辑 |
+| 按键 | 物理标签 | RX监听 | RX浏览列表 | RX浏览消息 | TX编辑 | TX发送中 |
+|------|---------|--------|-----------|----------|--------|---------|
+| 0~9 | 数字 | →TX编辑 | 查看选中 | — | T9输入 | — |
+| ← | 左移 | 滚动消息 | 选择上一条 | 向上滚 | 左移光标 | — |
+| → | 右移 | 滚动消息 | 选择下一条 | 向下滚 | 右移光标 | — |
+| 删除 | 删除 | — | 删除选中 | 退回列表 | 退格 | — |
+| 英/数 | KEY_FN | →TX编辑 | 退出浏览 | 退出浏览 | →接收 | — |
+| 发送 | KEY_SEND | 浏览已存 | 浏览选中 | 退回列表 | 发送 | — |
+
+**"rx" 快速切回**: 在编辑器中输入 "rx" (不区分大小写), 按 KEY_RIGHT 立即切换到接收模式.
+
+### 2026-07-08 键盘命名重构
+
+- **KEY_MODE → KEY_FN**: 物理"英/数"键, 在半双工中兼作输入模式切换和 RX↔TX 切换.
+- **KEY_SEND 增加浏览功能**: 在接收模式按 KEY_SEND 进入已存储消息浏览, 在编辑模式执行发送.
+- **key_names[] 更新**: 改为中文标签 "开/关","发送","英/数","删除","←","→" 匹配物理键盘.
+- **KEY_ 注释更新**: 所有 define 注释反映半双工中的实际功能.
 
 ### 2026-07-07 修复与合并
 
@@ -122,6 +134,28 @@ Words 54-66: 消息槽位 4
 - **新增 RX 子模式**: KEY_MODE 循环切换 LS_LISTENING/浏览列表/查看消息
 - **新增 FlashStore_Init**: main() 初始化阶段加载已存储消息
 - **新增 auto-save**: receiver.c rx_enter_done() 自动保存到 Flash
+
+### 2026-07-08 修复 (CubeMX 重生成后)
+
+- **简化 keyboard.c**: GPIO 已重新分配为全部在 GPIOA (PA0~PA7, 与单工一致),
+  移除 `col_ports[4]` 端口查找表, 恢复原始单 `COL_PORT` 宏。更新注释。
+- **修复 keyboard.h 注释**: 反映 PA0~PA3 行、PA4~PA7 列的布局。
+- **修复 LED 初始状态**: CubeMX 生成 `GPIO_PIN_RESET` → `GPIO_PIN_SET` (上电 LED 熄灭)。
+- **恢复 WKUP 使能**: 添加 `HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1)`,
+  PA0 作为键盘矩阵行的同时兼作 Standby 唤醒源。
+- **清理 receiver.c 死代码**: `rx_enter_error` 取消注释 (函数存在但未被调用, 与单工保持一致)。
+
+### 引脚分配 (2026-07-08 更新, 与单工一致)
+
+| 功能 | 引脚 | 模式 | 说明 |
+|------|------|------|------|
+| KB_ROW0~3 | PA0~PA3 | Output PP | 矩阵键盘行扫描 |
+| KB_COL0~3 | PA4~PA7 | Input PU | 矩阵键盘列读取 |
+| PWM 音频输出 | PA8 | AF1 PP | TIM1_CH1, 48.83kHz → RC 低通 |
+| 音频输入 | PB0 | Analog | ADC1_IN8 |
+| OLED SCL | PB6 | AF4 OD | I2C1 400kHz |
+| OLED SDA | PB7 | AF4 OD | I2C1 400kHz |
+| LED | PC13 | Output PP | 板载 LED |
 
 ### 待验证项
 - 半双工模式切换 (RX→TX→RX) 外设资源冲突检查
