@@ -5,9 +5,9 @@
   *
   *   Goertzel 算法在 320 采样点 (20ms @ 16kHz) 窗口内检测 4 个频率:
   *     1500 Hz → digit 0
-  *     2000 Hz → digit 1
-  *     2500 Hz → digit 2
-  *     3000 Hz → digit 3
+  *     1800 Hz → digit 1
+  *     2100 Hz → digit 2
+  *     2400 Hz → digit 3
   *
   *   使用浮点运算 (Cortex-M4 FPU 硬件加速).
   *   每个 320-sample 窗口 ≈ 4×1280 MAC 操作 ≈ 50µs @ 16MHz.
@@ -38,9 +38,9 @@ extern "C" {
 
 /* 4 个目标频率 (Hz) */
 #define FSK4_DECODER_F0    1500
-#define FSK4_DECODER_F1    2000
-#define FSK4_DECODER_F2    2500
-#define FSK4_DECODER_F3    3000
+#define FSK4_DECODER_F1    1800
+#define FSK4_DECODER_F2    2100
+#define FSK4_DECODER_F3    2400
 
 /* 噪声门限: magnitude² 低于此值 → 判为无信号
  *   满摆幅 3.3Vpp → ADC≈±2047 → mag² ≈ (2047×160)² ≈ 1.07×10¹¹
@@ -135,7 +135,7 @@ void FSK4_Decoder_GetMagnitudes(FSK4_Decoder *dec, float *mag_out);
 /**
   * @brief  获取 digit 名称字符串
   * @param  digit: 0~3
-  * @retval "1500Hz" / "2000Hz" / "2500Hz" / "3000Hz" / "?"
+  * @retval "1500Hz" / "1800Hz" / "2100Hz" / "2400Hz" / "?"
   */
 const char* FSK4_Decoder_GetFreqName(uint8_t digit);
 

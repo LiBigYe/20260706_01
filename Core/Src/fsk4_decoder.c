@@ -26,9 +26,9 @@
   *     │ f (Hz)   │  k  │ omega  │ coeff     │
   *     ├──────────┼─────┼────────┼───────────┤
   *     │ 1500     │ 30  │ 0.5890 │ 1.662939  │
-  *     │ 2000     │ 40  │ 0.7854 │ 1.414214  │
-  *     │ 2500     │ 50  │ 0.9817 │ 1.111140  │
-  *     │ 3000     │ 60  │ 1.1781 │ 0.765367  │
+  *     │ 1800     │ 36  │ 0.7069 │ 1.517638  │
+  *     │ 2100     │ 42  │ 0.8247 │ 1.353595  │
+  *     │ 2400     │ 48  │ 0.9425 │ 1.175571  │
   *     └──────────┴─────┴────────┴───────────┘
   *
   *   用 FPU 浮点运算 (Cortex-M4 单精度硬件浮点).
@@ -48,13 +48,13 @@
 /*  频率名称表                                                                 */
 /* ========================================================================== */
 
-static const char *freq_names[4] = {"1500Hz", "2000Hz", "2500Hz", "3000Hz"};
+static const char *freq_names[4] = {"1500Hz", "1800Hz", "2100Hz", "2400Hz"};
 
 static const uint16_t target_freqs[FSK4_DECODER_FREQ_COUNT] = {
     FSK4_DECODER_F0,  /* 1500 Hz */
-    FSK4_DECODER_F1,  /* 2000 Hz */
-    FSK4_DECODER_F2,  /* 2500 Hz */
-    FSK4_DECODER_F3,  /* 3000 Hz */
+    FSK4_DECODER_F1,  /* 1800 Hz */
+    FSK4_DECODER_F2,  /* 2100 Hz */
+    FSK4_DECODER_F3,  /* 2400 Hz */
 };
 
 const char* FSK4_Decoder_GetFreqName(uint8_t digit)
