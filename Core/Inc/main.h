@@ -77,6 +77,11 @@ void Error_Handler(void);
 #define KB_COL2_GPIO_Port GPIOA
 #define KB_COL3_Pin GPIO_PIN_7
 #define KB_COL3_GPIO_Port GPIOA
+#define POWER_BUTTON_Pin GPIO_PIN_1
+#define POWER_BUTTON_GPIO_Port GPIOB
+#define POWER_BUTTON_EXTI_IRQn EXTI1_IRQn
+#define POWER_CTRL_Pin GPIO_PIN_8
+#define POWER_CTRL_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -92,3 +92,13 @@ STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB)
 - 新增 RX 子模式 (LS_LISTENING/BROWSE_LIST/BROWSE_VIEW, KEY_MODE切换)
 - 新增 FlashStore_Init 初始化调用
 - 新增 receiver.c 自动保存 (rx_enter_done → FlashStore_SaveMessage)
+
+### 2026-07-10 — 增加硬件锁存软开关
+
+- 复用发送端软开关方案：`PB1=POWER_BUTTON/EXTI1`，`PB8=POWER_CTRL`。
+- 增加 HAL 初始化前的寄存器级早期锁存和 BOR 防重启等待逻辑。
+- 增加开机按键松手检测与 50ms 防抖。
+- EXTI 回调立即解除电源锁存；主循环停止 ADC DMA、TIM2、TIM3、RX 和 PWM DDS，关闭指示灯及 OLED 后等待硬件掉电。
+- `cmake --preset Debug` 与 `cmake --build --preset Debug --parallel` 构建通过；FLASH 49120B，RAM 7096B。
+- 待实机验证：RX/TX/浏览三种状态下均可可靠关机，且关机电流不大于 1mA。
+

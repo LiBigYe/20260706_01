@@ -46,6 +46,8 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
+volatile uint8_t g_ready = 0;
+volatile uint8_t g_power_off = 0;
 static uint16_t adc_dma_buf[ADC_BUF_SIZE];
 
 /* 半双工模式 */
@@ -72,6 +74,11 @@ static void HM_SwitchToTx(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static inline void Power_CutOff(void)
+{
+    GPIOB->BSRR = GPIO_BSRR_BR8;
+}
 
 /* ========================================================================== */
 /*  半双工: RX/TX 模式切换                                                     */
@@ -132,6 +139,19 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+  __DSB();
+  GPIOB->MODER &= ~GPIO_MODER_MODER1;
+  GPIOB->PUPDR = (GPIOB->PUPDR & ~GPIO_PUPDR_PUPD1) | GPIO_PUPDR_PUPD1_0;
+  GPIOB->MODER = (GPIOB->MODER & ~GPIO_MODER_MODER8) | GPIO_MODER_MODER8_0;
+  for (volatile int i = 0; i < 200; i++) { __NOP(); }
+  if ((GPIOB->IDR & GPIO_IDR_ID1) == 0) {
+      GPIOB->BSRR = GPIO_BSRR_BS8;
+  } else {
+      GPIOB->BSRR = GPIO_BSRR_BR8;
+      for (volatile int i = 0; i < 800000; i++) { __NOP(); }
+  }
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -160,6 +180,8 @@ int main(void)
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
+  HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
+
   /* 冷启动延时: 等 OLED VDD 稳定 (手册要求 1-50ms) */
   HAL_Delay(50);
 
@@ -180,11 +202,17 @@ int main(void)
   OLED_ShowString(0,  16, " Half-Duplex");
   OLED_ShowString(0,  32, "Rx: Stand By");
   OLED_Refresh();
-  HAL_Delay(1500);
+  HAL_Delay(500);
 
   /* 默认进入 RX 模式 */
   hm_mode = HM_RX;
   HM_SwitchToRx();
+
+  while (HAL_GPIO_ReadPin(POWER_BUTTON_GPIO_Port, POWER_BUTTON_Pin) == GPIO_PIN_RESET) {
+      HAL_Delay(10);
+  }
+  HAL_Delay(50);
+  g_ready = 1;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -206,6 +234,18 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (g_power_off) {
+        HAL_ADC_Stop_DMA(&hadc1);
+        HAL_TIM_Base_Stop(&htim2);
+        HAL_TIM_Base_Stop_IT(&htim3);
+        RX_Stop();
+        PWM_DDS_Shutdown();
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+        OLED_Clear();
+        OLED_Refresh();
+        while (1) { __NOP(); }
+    }
+
     uint8_t key = Keyboard_Scan();
 
     /* ── KEY_FN 边沿检测 ── */
@@ -844,10 +884,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, KB_ROW0_Pin|KB_ROW1_Pin|KB_ROW2_Pin|KB_ROW3_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
@@ -869,12 +912,37 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : POWER_BUTTON_Pin */
+  GPIO_InitStruct.Pin = POWER_BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(POWER_BUTTON_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : POWER_CTRL_Pin */
+  GPIO_InitStruct.Pin = POWER_CTRL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(POWER_CTRL_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == POWER_BUTTON_Pin && g_ready) {
+        g_power_off = 1;
+        Power_CutOff();
+    }
+}
 
 /* USER CODE END 4 */
 
