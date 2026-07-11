@@ -71,17 +71,19 @@ extern uint8_t g_device_id;
 #define KB_ROW2_GPIO_Port GPIOA
 #define KB_ROW3_Pin GPIO_PIN_3
 #define KB_ROW3_GPIO_Port GPIOA
-#define KB_COL0_Pin GPIO_PIN_4
-#define KB_COL0_GPIO_Port GPIOA
-#define KB_COL1_Pin GPIO_PIN_5
-#define KB_COL1_GPIO_Port GPIOA
-#define KB_COL2_Pin GPIO_PIN_6
-#define KB_COL2_GPIO_Port GPIOA
-#define KB_COL3_Pin GPIO_PIN_7
-#define KB_COL3_GPIO_Port GPIOA
+#define F_CS_Pin GPIO_PIN_4
+#define F_CS_GPIO_Port GPIOA
 #define POWER_BUTTON_Pin GPIO_PIN_1
 #define POWER_BUTTON_GPIO_Port GPIOB
 #define POWER_BUTTON_EXTI_IRQn EXTI1_IRQn
+#define KB_COL0_Pin GPIO_PIN_9
+#define KB_COL0_GPIO_Port GPIOA
+#define KB_COL1_Pin GPIO_PIN_10
+#define KB_COL1_GPIO_Port GPIOA
+#define KB_COL2_Pin GPIO_PIN_11
+#define KB_COL2_GPIO_Port GPIOA
+#define KB_COL3_Pin GPIO_PIN_12
+#define KB_COL3_GPIO_Port GPIOA
 #define POWER_CTRL_Pin GPIO_PIN_8
 #define POWER_CTRL_GPIO_Port GPIOB
 

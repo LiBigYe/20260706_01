@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/oled.c
     Core/Src/keyboard.c
+    Core/Src/py25q64.c
     Core/Src/editor.c
     Core/Src/pwm_dds.c
     Core/Src/transmitter.c
