@@ -49,6 +49,7 @@ extern "C" {
 /* Function prototypes -----------------------------------------------------*/
 void      Keyboard_Init(void);
 uint8_t   Keyboard_Scan(void);
+uint8_t   Keyboard_IsPressed(void);
 const char* Keyboard_GetKeyName(uint8_t key);
 
 #ifdef __cplusplus

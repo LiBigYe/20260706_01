@@ -5,7 +5,7 @@
   *
   *   Hardware layout (PA0=ROW0顶, PA3=ROW3底, PA4=COL0左, PA7=COL3右):
   *                Col0    Col1    Col2    Col3
-  *              (PA4)   (PA5)   (PA6)   (PA7)
+  *              (PA9)   (PA10)  (PA11)  (PA12)
   *   Row0 (PA0,顶): 1       2       3     开/关
   *   Row1 (PA1):    4       5       6     发送
   *   Row2 (PA2):    7       8       9     英/数
@@ -58,7 +58,7 @@ static uint8_t  repeat_phase = 0;  /* 0 = initial press, 1 = auto-repeat */
 
 /* Key mapping table: [row][col] -> KEY_ code -----------------------------*/
 /*
- *   Row (GPIO)               Col0(PA4) Col1(PA5) Col2(PA6) Col3(PA7)
+ *   Row (GPIO)               Col0(PA9) Col1(PA10) Col2(PA11) Col3(PA12)
  *   Row0 (PA0, 顶):          KEY_1     KEY_2     KEY_3     KEY_POWER
  *   Row1 (PA1):              KEY_4     KEY_5     KEY_6     KEY_SEND
  *   Row2 (PA2):              KEY_7     KEY_8     KEY_9     KEY_FN
@@ -190,6 +190,11 @@ uint8_t Keyboard_Scan(void)
   * @param  key: Key code (0~15)
   * @retval String describing the key
   */
+uint8_t Keyboard_IsPressed(void)
+{
+    return stable_key != KEY_NONE ? 1U : 0U;
+}
+
 const char* Keyboard_GetKeyName(uint8_t key)
 {
     if (key < 16) {

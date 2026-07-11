@@ -117,8 +117,8 @@ void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
     /* 初始频率: 前导 LO = 1500 Hz */
     TX_SetSymbol(FSK4_PILOT_LO);
 
-    /* 发送指示灯: PC13 低电平点亮 */
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    /* 发送已经开始，点亮红色发送指示灯 */
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
 
     /* 重新启动 TIM3 中断 (16kHz DDS 采样时钟).
      * TX_ClearDone() 在上一次传输完成后将其停止.
@@ -231,8 +231,8 @@ void TX_ClearDone(void)
     tx_done_flag = 0;
     tx_state     = TX_STATE_IDLE;
 
-    /* 发送指示灯: PC13 高电平熄灭 */
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    /* 发送结束或取消，熄灭红色发送指示灯 */
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 
     /* 确保 PWM 输出回到中值 50% 占空比 (1.65V DC) */
     PWM_DDS_OutputMidscale();

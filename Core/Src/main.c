@@ -193,6 +193,7 @@ static void HM_StopRxSampling(void)
     HAL_ADC_Stop_DMA(&hadc1);
     HAL_TIM_Base_Stop(&htim2);
     RX_Stop();
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
 }
 
 static void HM_StartRxSampling(void)
@@ -325,6 +326,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
+  /* 旧 PC13 指示灯不再参与收发状态，固定关闭。 */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
   /* 冷启动延时: 等 OLED VDD 稳定 (手册要求 1-50ms) */
   HAL_Delay(50);
@@ -376,6 +379,7 @@ int main(void)
   uint8_t  browse_cursor  = 0;
   uint8_t  view_scroll    = 0;
   uint8_t  last_key_del   = 0;
+  uint8_t  transition_key_lock = 0;
   uint32_t last_user_activity_tick = HAL_GetTick();
   const uint32_t oled_idle_timeout_ms = 20000U;
 
@@ -390,13 +394,18 @@ int main(void)
         HAL_TIM_Base_Stop_IT(&htim3);
         RX_Stop();
         PWM_DDS_Shutdown();
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
         OLED_Clear();
         OLED_Refresh();
         while (1) { __NOP(); }
     }
 
     uint8_t key = Keyboard_Scan();
+    if (transition_key_lock) {
+        if (!Keyboard_IsPressed()) transition_key_lock = 0U;
+        else key = KEY_NONE;
+    }
     uint32_t now_tick = HAL_GetTick();
     if (key != KEY_NONE || RX_IsFrameActive() || RX_IsDone()) {
         last_user_activity_tick = now_tick;
@@ -409,30 +418,35 @@ int main(void)
     if (hm_mode == HM_RX) {
 
         /* ── KEY_FN: 退出浏览 / 切换到发送编辑 ── */
-        if (key == KEY_FN) {
+        if (key == KEY_FN && !RX_IsDone()) {
             if (ls_mode != LS_LISTENING) {
                 ls_mode = LS_LISTENING;
+                transition_key_lock = 1U;
             } else if (!RX_IsFrameActive()) {
                 HM_SwitchToTxEdit();
+                transition_key_lock = 1U;
             }
             last_tick = 0;
             continue;
         }
 
         /* ── KEY_SEND → 浏览已存储消息 / 退出浏览 ── */
-        if (key == KEY_SEND) {
+        if (key == KEY_SEND && !RX_IsDone()) {
             if (ls_mode == LS_LISTENING) {
                 ls_mode       = LS_BROWSE_LIST;
                 browse_cursor = 0;
                 last_tick     = 0;
+                transition_key_lock = 1U;
+                continue;
             }
         }
 
         /* ── T9 键 → 进入编辑发信 (退出浏览) ── */
         if (ls_mode == LS_LISTENING && key >= KEY_0 && key <= KEY_9 &&
-            !RX_IsFrameActive()) {
+            !RX_IsFrameActive() && !RX_IsDone()) {
             ls_mode = LS_LISTENING;
             HM_SwitchToTxEdit();
+            transition_key_lock = 1U;
             Editor_HandleKey(key);
             continue;
         }
@@ -467,6 +481,7 @@ int main(void)
             HAL_Delay(2000);
             RX_ClearDone();
             HM_StartRxSampling();
+            transition_key_lock = 1U;
             last_tick = 0;
         }
 
@@ -548,6 +563,8 @@ int main(void)
                 ls_mode     = LS_BROWSE_VIEW;
                 view_scroll = 0;
                 last_tick   = 0;
+                transition_key_lock = 1U;
+                continue;
             }
 
             if (refresh || nav_changed) {
@@ -558,10 +575,12 @@ int main(void)
                 if (count == 0) {
                     OLED_ShowString(0, 2 * FONT_HEIGHT, "(no messages)");
                 } else {
-                    for (uint8_t i = 0; i < count && i < 5; i++) {
+                    uint8_t first = (uint8_t)((browse_cursor / 5U) * 5U);
+                    for (uint8_t row = 0; row < 5U && first + row < count; row++) {
+                        uint8_t i = (uint8_t)(first + row);
                         const FlashStore_MsgSlot *slot = FlashStore_GetMessage(i);
-                        uint8_t ry = (uint8_t)(1 + i) * FONT_HEIGHT;
-                        char pr[9];
+                        uint8_t ry = (uint8_t)(1 + row) * FONT_HEIGHT;
+                        char pr[12];
                         snprintf(pr, sizeof(pr), "%c%dF%u:",
                                  (i == browse_cursor) ? '>' : ' ', i + 1,
                                  slot ? slot->source_id : 0U);
@@ -588,7 +607,10 @@ int main(void)
         else if (ls_mode == LS_BROWSE_VIEW) {
             const FlashStore_MsgSlot *slot = FlashStore_GetMessage(browse_cursor);
             if (!slot || !slot->valid) {
-                ls_mode = LS_BROWSE_LIST; view_scroll = 0;
+                ls_mode = LS_BROWSE_LIST;
+                view_scroll = 0;
+                last_tick = 0;
+                continue;
             } else {
                 uint8_t vls[50], vll[50], vtl = 0; uint16_t vp = 0;
                 while (vp < slot->length) {
@@ -615,6 +637,9 @@ int main(void)
                 if (key == KEY_DELETE) {
                     ls_mode     = LS_BROWSE_LIST;
                     view_scroll = 0;
+                    last_tick = 0;
+                    transition_key_lock = 1U;
+                    continue;
                 }
 
                 if (refresh || key == KEY_LEFT || key == KEY_RIGHT) {
@@ -657,6 +682,7 @@ int main(void)
         /* ── 光标在末尾悬空 + KEY_RIGHT → 切回收信 ── */
         if (key == KEY_RIGHT && Editor_IsCursorAtEnd()) {
             HM_SwitchToRx();
+            transition_key_lock = 1U;
             last_tick = 0;
             continue;
         }
@@ -666,6 +692,7 @@ int main(void)
             if (key == KEY_SEND) {
                 if (Editor_GetLength() > 0) {
                     hm_mode = HM_TX_SELECT;
+                    transition_key_lock = 1U;
                     ShowTargetSelection(tx_target_mask);
                     continue;
                 }
@@ -701,11 +728,13 @@ int main(void)
             }
         } else if (key == KEY_DELETE || key == KEY_FN) {
             hm_mode = HM_TX_EDIT;
+            transition_key_lock = 1U;
             Editor_SetTxStatus("Tx Ready");
             last_tick = 0;
             continue;
         } else if (key == KEY_SEND) {
             HM_SwitchToTx(tx_target_mask);
+            transition_key_lock = 1U;
             continue;
         }
         ShowTargetSelection(tx_target_mask);
@@ -724,6 +753,7 @@ int main(void)
             TX_ClearDone();
             PWM_DDS_Shutdown();
             hm_mode = HM_TX_EDIT;
+            transition_key_lock = 1U;
             Editor_SetTxStatus("Tx Ready");
             last_tick = 0;
             continue;
@@ -1116,7 +1146,12 @@ static void MX_GPIO_Init(void)
                           |F_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LEDG_Pin|LEDR_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
+  /* 旧 PC13 指示灯不再参与收发状态，固定关闭。 */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
@@ -1145,12 +1180,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(POWER_BUTTON_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  /*Configure GPIO pins : LEDG_Pin LEDR_Pin POWER_CTRL_Pin */
+  GPIO_InitStruct.Pin = LEDG_Pin|LEDR_Pin|POWER_CTRL_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : KB_COL0_Pin KB_COL1_Pin KB_COL2_Pin KB_COL3_Pin */
@@ -1158,13 +1192,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : POWER_CTRL_Pin */
-  GPIO_InitStruct.Pin = POWER_CTRL_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(POWER_CTRL_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);

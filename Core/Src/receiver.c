@@ -296,8 +296,8 @@ static void rx_observe_pilot(void)
 
 static void rx_enter_listening(void)
 {
-    /* 收信指示灯: 回到待机时熄灭 */
-    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    /* 绿色接收指示灯：回到待机时熄灭 */
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
 
     rx_state         = RX_STATE_LISTENING;
     rx_env_hist      = 0;
@@ -438,8 +438,8 @@ static void rx_process_env_block(const uint16_t *samples)
                 rx_last_digit = digit;
                 FSK4_Decoder_GetMagnitudes(&rx_decoder, rx_last_mag);
 
-                /* 收信指示灯: 首个有效数据符号 → PC13 低电平点亮 */
-                HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+                /* 首个有效数据符号已确认，点亮绿色接收指示灯 */
+                HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
 
                 rx_state     = RX_STATE_DATA;
                 rx_consec_lo = 1;

@@ -76,6 +76,10 @@ extern uint8_t g_device_id;
 #define POWER_BUTTON_Pin GPIO_PIN_1
 #define POWER_BUTTON_GPIO_Port GPIOB
 #define POWER_BUTTON_EXTI_IRQn EXTI1_IRQn
+#define LEDG_Pin GPIO_PIN_2
+#define LEDG_GPIO_Port GPIOB
+#define LEDR_Pin GPIO_PIN_10
+#define LEDR_GPIO_Port GPIOB
 #define KB_COL0_Pin GPIO_PIN_9
 #define KB_COL0_GPIO_Port GPIOA
 #define KB_COL1_Pin GPIO_PIN_10
