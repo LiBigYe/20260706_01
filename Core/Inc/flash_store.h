@@ -49,7 +49,7 @@ extern "C" {
 #define FLASH_STORE_MAX_MSGS       5
 #define FLASH_STORE_MSG_DATA_LEN   50      /* 最大 48 字符 + null + room */
 #define FLASH_STORE_MAGIC          0x564F4943  /* "VOIC" */
-#define FLASH_STORE_VERSION        1
+#define FLASH_STORE_VERSION        2
 
 /* 闪存写入电压范围 (STM32F411 Scale 1 → Voltage Range 3) */
 #define FLASH_STORE_VOLTAGE_RANGE  FLASH_VOLTAGE_RANGE_3
@@ -60,6 +60,7 @@ extern "C" {
 
 typedef struct {
     uint8_t valid;                          /* 1 = 有效消息 */
+    uint8_t source_id;                      /* 来源终端 ID, 0=旧消息/未知 */
     uint8_t length;                         /* 消息长度 (0~48) */
     char    data[FLASH_STORE_MSG_DATA_LEN]; /* 消息内容 (null-terminated) */
 } FlashStore_MsgSlot;
@@ -88,6 +89,7 @@ void FlashStore_Init(void);
   *   阻塞约 200-400ms (16KB sector erase).
   */
 uint8_t FlashStore_SaveMessage(const char *msg, uint8_t len);
+uint8_t FlashStore_SaveMessageFrom(uint8_t source_id, const char *msg, uint8_t len);
 
 /**
   * @brief  删除指定槽位的消息

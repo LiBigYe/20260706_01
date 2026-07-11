@@ -199,12 +199,31 @@ void FSK4_Init(FSK4_Encoder *enc, const uint16_t *sine_lut)
   *
   *   Base-4 编码: digit3=(idx>>6)&0x3, digit2, digit1, digit0.
   */
-uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text)
+uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text,
+                     uint8_t source_id, uint16_t target_mask)
 {
     enc->symbol_count = 0;
-    enc->checksum     = 0;
+    enc->checksum = 0;
 
-    /* 1. 编码实际输入的文本 */
+    if (source_id < NET_MIN_DEVICE_ID || source_id > NET_MAX_DEVICE_ID) {
+        source_id = NET_MIN_DEVICE_ID;
+    }
+    target_mask &= NET_VALID_TARGET_MASK;
+
+    uint8_t header[NET_HEADER_BYTES] = {
+        source_id,
+        (uint8_t)(target_mask & 0xFFU),
+        (uint8_t)(target_mask >> 8)
+    };
+    for (uint8_t h = 0; h < NET_HEADER_BYTES; h++) {
+        uint8_t value = header[h];
+        enc->symbols[enc->symbol_count++] = (value >> 6) & 0x03;
+        enc->symbols[enc->symbol_count++] = (value >> 4) & 0x03;
+        enc->symbols[enc->symbol_count++] = (value >> 2) & 0x03;
+        enc->symbols[enc->symbol_count++] = value & 0x03;
+        enc->checksum ^= value;
+    }
+
     uint16_t len = 0;
     while (*text && len < FSK4_MAX_CHARS) {
         uint8_t idx = FSK4_CharToIndex(*text);
@@ -212,45 +231,40 @@ uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text)
             enc->symbols[enc->symbol_count++] = (idx >> 6) & 0x03;
             enc->symbols[enc->symbol_count++] = (idx >> 4) & 0x03;
             enc->symbols[enc->symbol_count++] = (idx >> 2) & 0x03;
-            enc->symbols[enc->symbol_count++] =  idx       & 0x03;
+            enc->symbols[enc->symbol_count++] = idx & 0x03;
             enc->checksum ^= idx;
             len++;
         }
         text++;
     }
 
-    /* 2. 追加 '$' 终止符 (索引 66), 标记真实消息结束.
-     *    若消息已达 48 字符, 跳过终止符 (全 48 字符均为真实内容). */
     if (len < FSK4_MAX_CHARS) {
-        uint8_t term_idx = 66;  /* '$' */
+        uint8_t term_idx = 66;
         enc->symbols[enc->symbol_count++] = (term_idx >> 6) & 0x03;
         enc->symbols[enc->symbol_count++] = (term_idx >> 4) & 0x03;
         enc->symbols[enc->symbol_count++] = (term_idx >> 2) & 0x03;
-        enc->symbols[enc->symbol_count++] =  term_idx       & 0x03;
+        enc->symbols[enc->symbol_count++] = term_idx & 0x03;
         enc->checksum ^= term_idx;
         len++;
     }
 
-    /* 3. 剩余位置用空格 (索引 65) 填充到满 48 字符, 满足接收端 196 符号定长期待 */
     while (len < FSK4_MAX_CHARS) {
-        uint8_t pad_idx = 65;  /* ' ' (空格) */
+        uint8_t pad_idx = 65;
         enc->symbols[enc->symbol_count++] = (pad_idx >> 6) & 0x03;
         enc->symbols[enc->symbol_count++] = (pad_idx >> 4) & 0x03;
         enc->symbols[enc->symbol_count++] = (pad_idx >> 2) & 0x03;
-        enc->symbols[enc->symbol_count++] =  pad_idx       & 0x03;
-        enc->checksum ^= pad_idx;  /* 校验和必须包含填充字符 */
+        enc->symbols[enc->symbol_count++] = pad_idx & 0x03;
+        enc->checksum ^= pad_idx;
         len++;
     }
 
-    /* 4. 追加校验和 (8-bit XOR → 4 base-4 symbols) */
     enc->symbols[enc->symbol_count++] = (enc->checksum >> 6) & 0x03;
     enc->symbols[enc->symbol_count++] = (enc->checksum >> 4) & 0x03;
     enc->symbols[enc->symbol_count++] = (enc->checksum >> 2) & 0x03;
-    enc->symbols[enc->symbol_count++] =  enc->checksum       & 0x03;
+    enc->symbols[enc->symbol_count++] = enc->checksum & 0x03;
 
     enc->total_symbols = enc->symbol_count;
     enc->total_time_ms = FSK4_EstimateTime(enc->total_symbols);
-
     return enc->symbol_count;
 }
 
@@ -261,8 +275,8 @@ uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text)
 /**
   * @brief  预估完整传输时间 (定长 48 字符)
   *
-  *   总时长 = 前导码 + (196符号 × 30ms) + 结束标志
-  *   T = 200 + 196×30 + 200 = 6,280 ms ≈ 6.28 秒
+  *   总时长 = 前导码 + (208符号 × 30ms) + 结束标志
+  *   T = 200 + 208×30 + 200 = 6,640 ms ≈ 6.64 秒
   *
   *   v4: 所有消息强制填充到 48 字符, 传输时间固定不变.
   */

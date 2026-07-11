@@ -62,9 +62,10 @@ static HAL_StatusTypeDef flash_write_slot(uint32_t addr, const FlashStore_MsgSlo
         return HAL_OK;
     }
 
-    /* Word 0: valid | length | data[0] | data[1] */
+    /* Word 0: packed valid/source | length | data[0] | data[1] */
     {
-        uint32_t w0 = ((uint32_t)slot->valid  << 24)
+        uint8_t packed_valid = (uint8_t)(0x80U | (slot->source_id & 0x0FU));
+        uint32_t w0 = ((uint32_t)packed_valid << 24)
                     | ((uint32_t)slot->length << 16)
                     | ((uint32_t)(uint8_t)slot->data[0] << 8)
                     | ((uint32_t)(uint8_t)slot->data[1]);
@@ -124,7 +125,14 @@ static void flash_read_slot(uint32_t addr, FlashStore_MsgSlot *slot)
 {
     /* Word 0: valid | length | data[0] | data[1] */
     uint32_t w0 = *(__IO uint32_t *)addr;
-    slot->valid  = (uint8_t)((w0 >> 24) & 0xFF);
+    uint8_t packed_valid = (uint8_t)((w0 >> 24) & 0xFF);
+    if (packed_valid == 1U) {
+        slot->valid = 1U;
+        slot->source_id = 0U;
+    } else {
+        slot->valid = (packed_valid & 0x80U) ? 1U : 0U;
+        slot->source_id = packed_valid & 0x0FU;
+    }
     slot->length = (uint8_t)((w0 >> 16) & 0xFF);
     slot->data[0] = (char)((w0 >> 8) & 0xFF);
     slot->data[1] = (char)(w0 & 0xFF);
@@ -259,8 +267,7 @@ void FlashStore_Init(void)
     uint32_t version = w1 & 0xFFFF;
     uint32_t flash_count = (w1 >> 16) & 0xFF;
 
-    if (version != FLASH_STORE_VERSION) {
-        /* 版本不兼容, 重置为空 */
+    if (version != 1U && version != FLASH_STORE_VERSION) {
         return;
     }
 
@@ -309,6 +316,11 @@ void FlashStore_Init(void)
   */
 uint8_t FlashStore_SaveMessage(const char *msg, uint8_t len)
 {
+    return FlashStore_SaveMessageFrom(0, msg, len);
+}
+
+uint8_t FlashStore_SaveMessageFrom(uint8_t source_id, const char *msg, uint8_t len)
+{
     if (len > 48) len = 48;
 
     /* 如果已满 (count == 5), 淘汰最旧 (slot 0), 其余左移 */
@@ -319,6 +331,7 @@ uint8_t FlashStore_SaveMessage(const char *msg, uint8_t len)
         }
         /* 新消息写入最后一个槽位 */
         msg_ram[FLASH_STORE_MAX_MSGS - 1].valid  = 1;
+        msg_ram[FLASH_STORE_MAX_MSGS - 1].source_id = source_id;
         msg_ram[FLASH_STORE_MAX_MSGS - 1].length = len;
         memcpy(msg_ram[FLASH_STORE_MAX_MSGS - 1].data, msg, len);
         msg_ram[FLASH_STORE_MAX_MSGS - 1].data[len] = '\0';
@@ -326,6 +339,7 @@ uint8_t FlashStore_SaveMessage(const char *msg, uint8_t len)
         /* 未满: 直接追加到 count 位置 */
         uint8_t idx = msg_count;
         msg_ram[idx].valid  = 1;
+        msg_ram[idx].source_id = source_id;
         msg_ram[idx].length = len;
         memcpy(msg_ram[idx].data, msg, len);
         msg_ram[idx].data[len] = '\0';

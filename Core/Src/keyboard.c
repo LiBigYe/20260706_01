@@ -156,15 +156,19 @@ uint8_t Keyboard_Scan(void)
                 return stable_key;
             }
         } else {
-            /* Key already stable, check auto-repeat */
-            if (repeat_phase == 0) {
-                if ((now - press_tick) >= HOLD_REPEAT_MS) {
-                    repeat_phase = 1;
-                    repeat_tick = now;
-                    return stable_key; /* first repeat */
-                }
-            } else {
-                if ((now - repeat_tick) >= REPEAT_RATE_MS) {
+            /* Auto-repeat only for cursor/delete keys. Control and number keys
+             * are edge-only so address selection cannot toggle repeatedly. */
+            uint8_t repeatable = (stable_key == KEY_LEFT ||
+                                  stable_key == KEY_RIGHT ||
+                                  stable_key == KEY_DELETE) ? 1U : 0U;
+            if (repeatable) {
+                if (repeat_phase == 0) {
+                    if ((now - press_tick) >= HOLD_REPEAT_MS) {
+                        repeat_phase = 1;
+                        repeat_tick = now;
+                        return stable_key;
+                    }
+                } else if ((now - repeat_tick) >= REPEAT_RATE_MS) {
                     repeat_tick = now;
                     return stable_key;
                 }

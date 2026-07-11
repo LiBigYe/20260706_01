@@ -56,6 +56,8 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 
+extern uint8_t g_device_id;
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

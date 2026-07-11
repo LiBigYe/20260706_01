@@ -33,7 +33,7 @@
   *   接收端 v4 DPLL 利用下降沿 [HI,HI,LO] 实现物理层符号定时恢复.
   *
   *   传输帧:
-  *     [前导 200ms] [192 数据符号 (48字符x4)] [4 校验符号] [结束 200ms]
+  *     [前导 200ms] [12 地址符号] [192 正文符号] [4 校验符号] [结束 200ms]
   *     总时长 ≈ 200 + 196×30 + 200 = 6280 ms ≈ 6.28 秒
   ******************************************************************************
   */
@@ -46,6 +46,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include "network_protocol.h"
 
 /* ========================================================================== */
 /*  常量定义                                                                   */
@@ -94,7 +95,7 @@ extern "C" {
   */
 typedef struct {
     /* ── 待发送的符号序列 ── */
-    uint8_t symbols[FSK4_MAX_CHARS * FSK4_SYMBOLS_PER_CHAR + FSK4_CHECKSUM_SYMBOLS];
+    uint8_t symbols[NET_HEADER_SYMBOLS + FSK4_MAX_CHARS * FSK4_SYMBOLS_PER_CHAR + FSK4_CHECKSUM_SYMBOLS];
     uint16_t symbol_count;          /* 实际符号数 (含校验) */
 
     /* ── 频率索引 (0~3) → 相位增量 ── */
@@ -134,7 +135,8 @@ void FSK4_Init(FSK4_Encoder *enc, const uint16_t *sine_lut);
   *  自动计算 XOR 校验和并追加 4 个校验符号。
   *  每个字符 → 索引 0~73 → 4 个 base-4 digit → 4 个符号。
   */
-uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text);
+uint16_t FSK4_Encode(FSK4_Encoder *enc, const char *text,
+                     uint8_t source_id, uint16_t target_mask);
 
 /**
   * @brief  根据频率索引获取 DDS 相位增量

@@ -4,7 +4,7 @@
   * @brief          : 4-FSK 发送状态机 — 声语信使项目 (PWM+DDS 版, v4)
   *
   *   状态转换:
-  *     IDLE → PREAMBLE(200ms) → DATA(192符号) → CHECKSUM(4符号)
+  *     IDLE → PREAMBLE(200ms) → DATA(12地址+192正文符号) → CHECKSUM(4符号)
   *          → POSTAMBLE(200ms) → DONE
   *
   *   时序 (16 kHz tick):
@@ -19,7 +19,7 @@
   *   由 TIM3 ISR (16kHz) 驱动: TX_Tick() 每 62.5 us 调用一次。
   *
   *   用法:
-  *     TX_Start(text)   : 编码 + 启动发送
+  *     TX_Start(text, source_id, target_mask): 编码地址与正文并发送
   *     TX_IsBusy()      : 发送中 → 主循环暂停键盘/编辑器
   *     TX_IsDone()      : 刚完成 → 显示结果后 TX_ClearDone()
   ******************************************************************************
@@ -51,7 +51,7 @@ extern "C" {
 /* ========================================================================== */
 
 void      TX_Init(void);
-void      TX_Start(const char *text);
+void      TX_Start(const char *text, uint8_t source_id, uint16_t target_mask);
 void      TX_Tick(void);           /* 由 TIM3 ISR 调用 */
 uint8_t   TX_IsBusy(void);
 uint8_t   TX_IsDone(void);

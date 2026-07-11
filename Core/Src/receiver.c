@@ -102,10 +102,13 @@ static uint8_t       rx_holdoff;      /* 死区定时器 (blocks), 触发后闭�
 /* 解码结果 */
 static char          rx_message[RX_MAX_CHARS + 1];
 static uint8_t       rx_msg_length;
+static uint8_t       rx_source_id;
+static uint16_t      rx_target_mask;
 
 /* 上一次成功接收的消息 (保留供显示滚动) */
 static char          rx_display_msg[RX_MAX_CHARS + 1];
 static uint8_t       rx_display_len;
+static uint8_t       rx_display_source_id;
 static uint8_t       rx_scroll_line;   /* 显示起始行号 */
 
 /* 调试 — 最近一次检测 */
@@ -128,21 +131,20 @@ static uint8_t decode_char_index(uint8_t s3, uint8_t s2, uint8_t s1, uint8_t s0)
 static uint8_t rx_verify_checksum(const uint8_t *sym)
 {
     uint8_t calc_cs = 0;
-
+    for (uint8_t h = 0; h < NET_HEADER_BYTES; h++) {
+        calc_cs ^= decode_char_index(sym[h * 4 + 0], sym[h * 4 + 1],
+                                     sym[h * 4 + 2], sym[h * 4 + 3]);
+    }
     for (uint16_t i = 0; i < RX_MAX_CHARS; i++) {
-        uint8_t idx = decode_char_index(
-            sym[i * 4 + 0], sym[i * 4 + 1],
-            sym[i * 4 + 2], sym[i * 4 + 3]
-        );
+        uint16_t offset = RX_HEADER_SYMBOLS + i * 4;
+        uint8_t idx = decode_char_index(sym[offset + 0], sym[offset + 1],
+                                        sym[offset + 2], sym[offset + 3]);
         if (idx >= RX_CHARSET_SIZE) return 0;
         calc_cs ^= idx;
     }
-
-    uint8_t rx_cs = decode_char_index(
-        sym[RX_MAX_CHARS * 4 + 0], sym[RX_MAX_CHARS * 4 + 1],
-        sym[RX_MAX_CHARS * 4 + 2], sym[RX_MAX_CHARS * 4 + 3]
-    );
-
+    uint16_t cs_offset = RX_HEADER_SYMBOLS + RX_MESSAGE_SYMBOLS;
+    uint8_t rx_cs = decode_char_index(sym[cs_offset + 0], sym[cs_offset + 1],
+                                      sym[cs_offset + 2], sym[cs_offset + 3]);
     return (calc_cs == rx_cs) ? 1 : 0;
 }
 
@@ -155,11 +157,19 @@ static uint8_t rx_verify_checksum(const uint8_t *sym)
   */
 static void rx_decode_message(void)
 {
-    /* 1. 先按定长 48 字符全部解码 */
+    rx_source_id = decode_char_index(rx_symbols[0], rx_symbols[1],
+                                     rx_symbols[2], rx_symbols[3]);
+    uint8_t mask_lo = decode_char_index(rx_symbols[4], rx_symbols[5],
+                                        rx_symbols[6], rx_symbols[7]);
+    uint8_t mask_hi = decode_char_index(rx_symbols[8], rx_symbols[9],
+                                        rx_symbols[10], rx_symbols[11]);
+    rx_target_mask = ((uint16_t)mask_hi << 8) | mask_lo;
+
     for (uint16_t i = 0; i < RX_MAX_CHARS; i++) {
+        uint16_t offset = RX_HEADER_SYMBOLS + i * 4;
         uint8_t idx = decode_char_index(
-            rx_symbols[i * 4 + 0], rx_symbols[i * 4 + 1],
-            rx_symbols[i * 4 + 2], rx_symbols[i * 4 + 3]
+            rx_symbols[offset + 0], rx_symbols[offset + 1],
+            rx_symbols[offset + 2], rx_symbols[offset + 3]
         );
         rx_message[i] = RX_IndexToChar(idx);
     }
@@ -292,10 +302,11 @@ static void rx_enter_done(void)
     /* 保存本次成功消息到显示缓冲区 */
     memcpy(rx_display_msg, rx_message, rx_msg_length + 1);
     rx_display_len = rx_msg_length;
+    rx_display_source_id = rx_source_id;
     rx_scroll_line = 0;
 
     /* 非易失存储: 自动保存到内部 Flash (断电不丢失) */
-    FlashStore_SaveMessage(rx_message, rx_msg_length);
+    FlashStore_SaveMessageFrom(rx_source_id, rx_message, rx_msg_length);
 }
 
 /**
@@ -415,7 +426,13 @@ static void rx_process_env_block(const uint16_t *samples)
             if (rx_symbol_idx >= RX_TOTAL_SYMBOLS) {
                 if (rx_verify_checksum(rx_symbols)) {
                     rx_decode_message();
-                    rx_enter_done();
+                    if (rx_source_id >= NET_MIN_DEVICE_ID &&
+                        rx_source_id <= NET_MAX_DEVICE_ID &&
+                        NET_IsAddressedTo(rx_target_mask, g_device_id)) {
+                        rx_enter_done();
+                    } else {
+                        rx_enter_listening();
+                    }
                 } else {
                     /* 校验失败自动重置, 准备接下一包 */
                     rx_enter_listening();
@@ -442,6 +459,8 @@ void RX_Init(void)
     rx_done_flag = 0;
     memset(rx_symbols, 0, sizeof(rx_symbols));
     memset(rx_message, 0, sizeof(rx_message));
+    rx_source_id = 0;
+    rx_target_mask = 0;
 }
 
 void RX_Start(void)
@@ -450,6 +469,8 @@ void RX_Start(void)
     memset(rx_symbols, 0, sizeof(rx_symbols));
     memset(rx_message, 0, sizeof(rx_message));
     rx_msg_length = 0;
+    rx_source_id = 0;
+    rx_target_mask = 0;
     rx_enter_listening();
 }
 
@@ -499,6 +520,9 @@ const char* RX_GetStateName(void)
 
 const char* RX_GetMessage(void)       { return rx_message; }
 uint8_t     RX_GetMessageLength(void) { return rx_msg_length; }
+uint8_t     RX_GetSourceId(void) { return rx_source_id; }
+uint16_t    RX_GetTargetMask(void) { return rx_target_mask; }
+uint8_t     RX_GetDisplaySourceId(void) { return rx_display_source_id; }
 
 void RX_GetLastSymbol(uint8_t *digit, float *mag)
 {

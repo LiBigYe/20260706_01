@@ -26,6 +26,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "network_protocol.h"
 
 /* ========================================================================== */
 /*  帧结构常量 (与发送端 fsk4_encoder.c 一致)                                  */
@@ -34,7 +35,9 @@ extern "C" {
 #define RX_MAX_CHARS          48
 #define RX_SYMBOLS_PER_CHAR   4
 #define RX_CHECKSUM_SYMBOLS   4
-#define RX_TOTAL_SYMBOLS      (RX_MAX_CHARS * RX_SYMBOLS_PER_CHAR + RX_CHECKSUM_SYMBOLS)  /* 196 */
+#define RX_HEADER_SYMBOLS     NET_HEADER_SYMBOLS
+#define RX_MESSAGE_SYMBOLS    (RX_MAX_CHARS * RX_SYMBOLS_PER_CHAR)
+#define RX_TOTAL_SYMBOLS      (RX_HEADER_SYMBOLS + RX_MESSAGE_SYMBOLS + RX_CHECKSUM_SYMBOLS)
 #define RX_CHARSET_SIZE       75  /* 含 '$' 终止符 + \n */
 #define VISIBLE_ROWS           7
 #define DISP_COLS              21
@@ -98,6 +101,9 @@ const char* RX_GetStateName(void);
 
 const char* RX_GetMessage(void);
 uint8_t     RX_GetMessageLength(void);
+uint8_t     RX_GetSourceId(void);
+uint16_t    RX_GetTargetMask(void);
+uint8_t     RX_GetDisplaySourceId(void);
 
 void      RX_GetLastSymbol(uint8_t *digit, float *mag);
 

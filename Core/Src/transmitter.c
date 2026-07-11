@@ -100,11 +100,11 @@ void TX_Init(void)
     tx_done_flag    = 0;
 }
 
-void TX_Start(const char *text)
+void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
 {
     /* 编码文本 → symbols[] */
     FSK4_Init(&tx_enc, NULL);   /* sine_lut 参数仅用于验证, 传 NULL 跳过 */
-    FSK4_Encode(&tx_enc, text);
+    FSK4_Encode(&tx_enc, text, source_id, target_mask);
 
     /* 启动状态机 */
     tx_state       = TX_STATE_PREAMBLE;
