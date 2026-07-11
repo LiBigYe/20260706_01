@@ -23,7 +23,6 @@
 
 #include "receiver.h"
 #include "fsk4_decoder.h"
-#include "flash_store.h"
 #include <string.h>
 
 /* ========================================================================== */
@@ -98,6 +97,11 @@ static uint8_t       rx_tone_full;      /* 1 = 已累积 >=320 样本 */
 static uint8_t       rx_symbols[RX_TOTAL_SYMBOLS];  /* 196 */
 static uint16_t      rx_symbol_idx;
 static uint8_t       rx_holdoff;      /* 死区定时器 (blocks), 触发后闭眼 20ms */
+static uint32_t      rx_noise_floor;
+static uint32_t      rx_energy_threshold;
+static uint8_t       rx_pilot_last_digit;
+static uint8_t       rx_pilot_transitions;
+static uint16_t      rx_startup_quiet_blocks;
 
 /* 解码结果 */
 static char          rx_message[RX_MAX_CHARS + 1];
@@ -267,6 +271,25 @@ static uint8_t rx_goertzel_from_ring(void)
     return FSK4_Decoder_DetectBlock(&rx_decoder, tone_contig);
 }
 
+static void rx_observe_pilot(void)
+{
+    uint8_t digit;
+
+    if (!rx_tone_full || (rx_block_total % RX_PREAMBLE_PILOT_CHECK_BLOCKS) != 0U) {
+        return;
+    }
+
+    digit = rx_goertzel_from_ring();
+    if (digit != RX_PILOT_LO && digit != RX_PILOT_HI) {
+        return;
+    }
+
+    if (rx_pilot_last_digit != 0xFFU && digit != rx_pilot_last_digit) {
+        rx_pilot_transitions++;
+    }
+    rx_pilot_last_digit = digit;
+}
+
 /* ========================================================================== */
 /*  内部 — 状态转换                                                             */
 /* ========================================================================== */
@@ -286,6 +309,8 @@ static void rx_enter_listening(void)
     rx_tone_full     = 0;
     rx_symbol_idx    = 0;
     rx_holdoff       = 0;   /* 重置死区 */
+    rx_pilot_last_digit = 0xFFU;
+    rx_pilot_transitions = 0U;
     memset(rx_tone_ring, 0, sizeof(rx_tone_ring));
     memset(rx_symbols, 0, sizeof(rx_symbols));
 }
@@ -305,8 +330,6 @@ static void rx_enter_done(void)
     rx_display_source_id = rx_source_id;
     rx_scroll_line = 0;
 
-    /* 非易失存储: 自动保存到内部 Flash (断电不丢失) */
-    FlashStore_SaveMessageFrom(rx_source_id, rx_message, rx_msg_length);
 }
 
 /**
@@ -332,9 +355,38 @@ static void rx_process_env_block(const uint16_t *samples)
         }
     }
 
-    /* ── 2. 计算能量并更新历史 ── */
+    /* ── 2. 计算能量并按背景噪声自适应判定 HI/LO ── */
     uint32_t energy = rx_compute_energy(samples);
-    uint8_t  hi     = (energy >= RX_ENV_ENERGY_HI_THRESH) ? 1 : 0;
+    uint32_t adaptive_threshold = rx_noise_floor * RX_ENV_NOISE_MULTIPLIER +
+                                  RX_ENV_NOISE_MARGIN;
+    if (adaptive_threshold < RX_ENV_ENERGY_MIN_THRESH) {
+        adaptive_threshold = RX_ENV_ENERGY_MIN_THRESH;
+    }
+    if (adaptive_threshold > RX_ENV_ENERGY_MAX_THRESH) {
+        adaptive_threshold = RX_ENV_ENERGY_MAX_THRESH;
+    }
+    rx_energy_threshold = adaptive_threshold;
+    uint8_t hi = (energy >= rx_energy_threshold) ? 1U : 0U;
+
+    /* 上电/重新启动接收后先等待连续静稳窗口，滤除运放、偏置和 ADC 启动瞬态。 */
+    if (rx_state == RX_STATE_LISTENING &&
+        rx_startup_quiet_blocks < RX_ENV_STARTUP_QUIET_BLOCKS) {
+        if (energy < RX_ENV_STARTUP_REJECT_THRESH) {
+            if (rx_startup_quiet_blocks == 0U) {
+                rx_noise_floor = energy;
+            } else {
+                rx_noise_floor = (rx_noise_floor * 3U + energy) / 4U;
+            }
+            rx_startup_quiet_blocks++;
+        } else {
+            rx_startup_quiet_blocks = 0U;
+        }
+        hi = 0U;
+    } else if (rx_state == RX_STATE_LISTENING && !hi) {
+        /* 正常监听期间只用 LO 块慢速跟踪背景噪声，导频和数据期间冻结。 */
+        rx_noise_floor = ((rx_noise_floor << RX_ENV_NOISE_IIR_SHIFT) - rx_noise_floor +
+                          energy) >> RX_ENV_NOISE_IIR_SHIFT;
+    }
 
     /* 8-bit shift register 防止低位截断, 但只检查低 3-bit 做下降沿 */
     rx_env_hist = (uint8_t)(((uint16_t)rx_env_hist << 1) | hi);
@@ -363,11 +415,14 @@ static void rx_process_env_block(const uint16_t *samples)
             rx_state       = RX_STATE_PREAMBLE;
             rx_block_total = rx_consec_hi;
             rx_consec_lo   = 0;
+            rx_pilot_last_digit = 0xFFU;
+            rx_pilot_transitions = 0U;
         }
         break;
 
     /* ── PREAMBLE: 等待第一个下降沿 → 验证假锁 → DATA ── */
     case RX_STATE_PREAMBLE:
+        rx_observe_pilot();
         if (rx_block_total > RX_ENV_PREAMBLE_TIMEOUT || rx_consec_lo >= 8) {
             rx_enter_listening();
             break;
@@ -376,8 +431,8 @@ static void rx_process_env_block(const uint16_t *samples)
         if (falling_edge && rx_tone_full && rx_holdoff == 0) {
             uint8_t digit = rx_goertzel_from_ring();
 
-            /* 假锁保护: 若解出噪声 → 退回 LISTENING, 不入 DATA */
-            if (digit != 0xFF) {
+            /* 导频必须已观察到 1500Hz/2400Hz 的交替，防止单一窄带噪声假锁。 */
+            if (rx_pilot_transitions >= RX_PREAMBLE_MIN_TRANSITIONS && digit != 0xFF) {
                 rx_symbols[0] = digit;
                 rx_symbol_idx = 1;
                 rx_last_digit = digit;
@@ -461,6 +516,9 @@ void RX_Init(void)
     memset(rx_message, 0, sizeof(rx_message));
     rx_source_id = 0;
     rx_target_mask = 0;
+    rx_noise_floor = RX_ENV_NOISE_FLOOR_INIT;
+    rx_energy_threshold = RX_ENV_ENERGY_MIN_THRESH;
+    rx_startup_quiet_blocks = 0U;
 }
 
 void RX_Start(void)
@@ -471,6 +529,7 @@ void RX_Start(void)
     rx_msg_length = 0;
     rx_source_id = 0;
     rx_target_mask = 0;
+    rx_startup_quiet_blocks = 0U;
     rx_enter_listening();
 }
 
@@ -501,6 +560,14 @@ uint8_t RX_IsBusy(void)
             rx_state == RX_STATE_PREAMBLE ||
             rx_state == RX_STATE_DATA) ? 1 : 0;
 }
+
+uint8_t RX_IsFrameActive(void)
+{
+    return (rx_state == RX_STATE_PREAMBLE || rx_state == RX_STATE_DATA) ? 1U : 0U;
+}
+
+uint32_t RX_GetNoiseFloor(void) { return rx_noise_floor; }
+uint32_t RX_GetEnergyThreshold(void) { return rx_energy_threshold; }
 
 uint8_t RX_IsDone(void)          { return rx_done_flag; }
 uint8_t RX_GetState(void)        { return rx_state; }

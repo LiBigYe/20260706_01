@@ -116,8 +116,8 @@ void FSK4_Decoder_ProcessSample(FSK4_Decoder *dec, uint16_t sample)
 {
     if (dec->sample_count >= dec->block_size) return;
 
-    /* 去直流: ADC 中心 ≈ 2048 (12-bit), 转 float */
-    float x = (float)((int32_t)sample - 2048);
+    /* 去直流: 使用本窗口的动态均值，抵消模拟前端偏置漂移。 */
+    float x = (float)sample - dec->dc_offset;
 
     for (uint8_t i = 0; i < FSK4_DECODER_FREQ_COUNT; i++) {
         float q0 = dec->coeff[i] * dec->q1[i] - dec->q2[i] + x;
@@ -150,7 +150,11 @@ void FSK4_Decoder_ProcessSample(FSK4_Decoder *dec, uint16_t sample)
             }
         }
 
-        /* 检查: (1) 低于噪声门限, 或 (2) SNR 不足 → 判噪声 */
+        dec->last_peak_mag = max_mag;
+        dec->last_second_mag = second_mag;
+        dec->last_peak_ratio = (second_mag > 0.0f) ? (max_mag / second_mag) : max_mag;
+
+        /* 检查: (1) 低于绝对能量门限, 或 (2) 频率峰值比不足 → 判噪声 */
         if (max_mag < FSK4_DECODER_NOISE_THRESHOLD) {
             dec->dominant_digit = 0xFF;
         } else if (max_mag < second_mag * FSK4_DECODER_SNR_RATIO) {
@@ -178,10 +182,17 @@ uint8_t FSK4_Decoder_DetectBlock(FSK4_Decoder *dec, const uint16_t *samples)
         if (v < vmin) vmin = v;
         if (v > vmax) vmax = v;
     }
-    if ((vmax - vmin) < FSK4_DECODER_MIN_AMPLITUDE) {
+    dec->last_amplitude = (uint16_t)(vmax - vmin);
+    if (dec->last_amplitude < FSK4_DECODER_MIN_AMPLITUDE) {
         dec->dominant_digit = 0xFF;
         return 0xFF;
     }
+
+    uint32_t sum = 0U;
+    for (uint16_t i = 0; i < dec->block_size; i++) {
+        sum += samples[i];
+    }
+    dec->dc_offset = (float)sum / (float)dec->block_size;
 
     /* ── Goertzel 检测 ── */
     FSK4_Decoder_Reset(dec);

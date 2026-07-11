@@ -59,7 +59,16 @@ extern "C" {
 #define RX_ENV_GUARD_BLOCKS   2
 #define RX_ENV_HISTORY_SIZE   8
 #define RX_SUBBLOCKS_PER_HALF (RX_BLOCK_SIZE / RX_ENV_BLOCK_SIZE)  /* 5 */
-#define RX_ENV_ENERGY_HI_THRESH  25000
+#define RX_ENV_ENERGY_MIN_THRESH 25000U
+#define RX_ENV_NOISE_FLOOR_INIT  1200U
+#define RX_ENV_NOISE_IIR_SHIFT   4U
+#define RX_ENV_NOISE_MULTIPLIER  4U
+#define RX_ENV_NOISE_MARGIN      4000U
+#define RX_ENV_ENERGY_MAX_THRESH 60000U
+#define RX_ENV_STARTUP_QUIET_BLOCKS  40U
+#define RX_ENV_STARTUP_REJECT_THRESH 60000U
+#define RX_PREAMBLE_PILOT_CHECK_BLOCKS 4U
+#define RX_PREAMBLE_MIN_TRANSITIONS    1U
 
 #define RX_ENV_PREAMBLE_MIN_HI   6
 #define RX_ENV_PREAMBLE_TIMEOUT  60
@@ -93,6 +102,9 @@ void      RX_Stop(void);
 void      RX_ProcessHalfBuffer(const uint16_t *buf);
 
 uint8_t   RX_IsBusy(void);
+uint8_t   RX_IsFrameActive(void);
+uint32_t  RX_GetNoiseFloor(void);
+uint32_t  RX_GetEnergyThreshold(void);
 uint8_t   RX_IsDone(void);
 uint8_t   RX_GetState(void);
 uint16_t  RX_GetSymbolCount(void);

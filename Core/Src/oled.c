@@ -17,6 +17,7 @@
 /* -------------------------------------------------------------------------- */
 
 static I2C_HandleTypeDef *oled_i2c;   /* Set by OLED_Init() */
+static uint8_t oled_display_enabled = 1U;
 
 /* SSD1306 control byte prefixes */
 #define CTRL_CMD     0x00   /* Following byte is a command */
@@ -234,6 +235,7 @@ void OLED_Init(I2C_HandleTypeDef *hi2c)
 
     /* Display ON */
     OLED_WriteCmd(0xAF);
+    oled_display_enabled = 1U;
 }
 
 /**
@@ -364,8 +366,33 @@ void OLED_ShowStringInvert(uint8_t x, uint8_t y, const char *str)
   * @brief  Refresh the OLED display by sending framebuffer to SSD1306
   *         Uses horizontal addressing mode: sends all 8 pages
   */
+void OLED_SetDisplay(uint8_t enabled)
+{
+    enabled = enabled ? 1U : 0U;
+    if (enabled == oled_display_enabled) {
+        return;
+    }
+
+    OLED_WriteCmd(enabled ? 0xAF : 0xAE);
+    oled_display_enabled = enabled;
+
+    /* Wake must restore the complete framebuffer, not only the panel state. */
+    if (enabled) {
+        OLED_Refresh();
+    }
+}
+
+uint8_t OLED_IsDisplayEnabled(void)
+{
+    return oled_display_enabled;
+}
+
 void OLED_Refresh(void)
 {
+    if (!oled_display_enabled) {
+        return;
+    }
+
     /* Set column address range: 0~127 */
     OLED_WriteCmd(0x21);
     OLED_WriteCmd(0x00);

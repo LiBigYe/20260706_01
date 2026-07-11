@@ -3,7 +3,7 @@
   * @file           : flash_store.c
   * @brief          : 内部Flash非易失消息存储实现 — 声语信使接收端
   *
-  *   使用 STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB) 存储.
+  *   使用 STM32F411CEU6 内部 Flash Sector 4 (0x08010000, 64KB) 存储.
   *
   *   消息槽位在 RAM 中维护 (按接收时间从旧到新排列),
   *   每次保存/删除时擦除 sector 并全量重写.
@@ -174,7 +174,7 @@ static void flash_read_slot(uint32_t addr, FlashStore_MsgSlot *slot)
   *
   *   操作序列:
   *     1. 解锁 Flash
-  *     2. 擦除 Sector 3 (200-400ms)
+  *     2. 擦除共享存储 Sector (200-400ms)
   *     3. 写入 header (2 words: magic + version|count)
   *     4. 逐槽位写入 5 条消息 (每槽 13 words)
   *     5. 锁定 Flash
@@ -190,7 +190,7 @@ static HAL_StatusTypeDef flash_write_all(void)
         return HAL_ERROR;
     }
 
-    /* 2. 擦除 Sector 3 */
+    /* 2. 擦除共享存储 Sector */
     FLASH_EraseInitTypeDef erase_cfg = {0};
     uint32_t sector_error = 0;
 
@@ -205,16 +205,17 @@ static HAL_StatusTypeDef flash_write_all(void)
         return status;
     }
 
-    /* 3. 写入 Word 0: Magic */
-    status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
-                               FLASH_STORE_ADDR,
-                               FLASH_STORE_MAGIC);
-    if (status != HAL_OK) {
-        HAL_FLASH_Lock();
-        return status;
+    /* 3. 先写全部槽位；此时 Word 0 仍为擦除态，记录尚未提交。 */
+    for (uint8_t i = 0; i < FLASH_STORE_MAX_MSGS; i++) {
+        uint32_t slot_addr = FLASH_STORE_ADDR + 8 + (uint32_t)i * FLASH_MSG_WORDS * 4;
+        status = flash_write_slot(slot_addr, &msg_ram[i]);
+        if (status != HAL_OK) {
+            HAL_FLASH_Lock();
+            return status;
+        }
     }
 
-    /* 4. 写入 Word 1: Version | msg_count */
+    /* 4. 写入 Version | msg_count。 */
     {
         uint32_t w1 = ((uint32_t)FLASH_STORE_VERSION)
                     | ((uint32_t)msg_count << 16);
@@ -226,14 +227,13 @@ static HAL_StatusTypeDef flash_write_all(void)
         }
     }
 
-    /* 5. 逐槽位写入消息 */
-    for (uint8_t i = 0; i < FLASH_STORE_MAX_MSGS; i++) {
-        uint32_t slot_addr = FLASH_STORE_ADDR + 8 + (uint32_t)i * FLASH_MSG_WORDS * 4;
-        status = flash_write_slot(slot_addr, &msg_ram[i]);
-        if (status != HAL_OK) {
-            HAL_FLASH_Lock();
-            return status;
-        }
+    /* 5. 最后写 Magic 作为提交标记，掉电时不会误读半写入数据。 */
+    status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                               FLASH_STORE_ADDR,
+                               FLASH_STORE_MAGIC);
+    if (status != HAL_OK) {
+        HAL_FLASH_Lock();
+        return status;
     }
 
     /* 6. 锁定 Flash */
@@ -249,64 +249,75 @@ static HAL_StatusTypeDef flash_write_all(void)
 /**
   * @brief  初始化存储系统: 从 Flash 加载已有消息到 RAM
   */
-void FlashStore_Init(void)
+static uint8_t flash_load_from(uint32_t base_addr)
 {
-    /* 初始化 RAM 为空 */
+    uint32_t magic;
+    uint32_t w1;
+    uint32_t version;
+    uint32_t flash_count;
+
     memset(msg_ram, 0, sizeof(msg_ram));
     msg_count = 0;
 
-    /* 读取 Word 0: Magic 验证 */
-    uint32_t magic = *(__IO uint32_t *)FLASH_STORE_ADDR;
+    magic = *(__IO uint32_t *)base_addr;
     if (magic != FLASH_STORE_MAGIC) {
-        /* 首次上电或 sector 被擦除, 保持空状态 */
-        return;
+        return 0U;
     }
 
-    /* 读取 Word 1: Version | msg_count */
-    uint32_t w1 = *(__IO uint32_t *)(FLASH_STORE_ADDR + 4);
-    uint32_t version = w1 & 0xFFFF;
-    uint32_t flash_count = (w1 >> 16) & 0xFF;
-
+    w1 = *(__IO uint32_t *)(base_addr + 4U);
+    version = w1 & 0xFFFFU;
+    flash_count = (w1 >> 16) & 0xFFU;
     if (version != 1U && version != FLASH_STORE_VERSION) {
-        return;
+        return 0U;
     }
-
     if (flash_count > FLASH_STORE_MAX_MSGS) {
         flash_count = FLASH_STORE_MAX_MSGS;
     }
 
-    /* 逐槽位读取消息 */
     for (uint8_t i = 0; i < FLASH_STORE_MAX_MSGS; i++) {
-        uint32_t slot_addr = FLASH_STORE_ADDR + 8 + (uint32_t)i * FLASH_MSG_WORDS * 4;
+        uint32_t slot_addr = base_addr + 8U + (uint32_t)i * FLASH_MSG_WORDS * 4U;
         flash_read_slot(slot_addr, &msg_ram[i]);
-        if (msg_ram[i].valid) {
-            if (i >= msg_count) {
-                msg_count = i + 1;
-            }
+        if (msg_ram[i].valid && i >= msg_count) {
+            msg_count = i + 1U;
         }
     }
 
-    /* 一致性校验: 若 flash_count 与有效槽位数不符, 以实际槽位为准 */
-    uint8_t actual_count = 0;
-    for (uint8_t i = 0; i < FLASH_STORE_MAX_MSGS; i++) {
-        if (msg_ram[i].valid) actual_count++;
-    }
-    if (flash_count != actual_count) {
-        /* 数据不一致 (可能是写入中断), 以实际槽位为准.
-           确保没有空隙 (compact) */
-        uint8_t write_idx = 0;
-        for (uint8_t read_idx = 0; read_idx < FLASH_STORE_MAX_MSGS; read_idx++) {
-            if (msg_ram[read_idx].valid) {
-                if (write_idx != read_idx) {
-                    memcpy(&msg_ram[write_idx], &msg_ram[read_idx],
-                           sizeof(FlashStore_MsgSlot));
-                    memset(&msg_ram[read_idx], 0, sizeof(FlashStore_MsgSlot));
+    {
+        uint8_t actual_count = 0U;
+        uint8_t write_idx = 0U;
+        for (uint8_t i = 0; i < FLASH_STORE_MAX_MSGS; i++) {
+            if (msg_ram[i].valid) {
+                actual_count++;
+                if (write_idx != i) {
+                    memcpy(&msg_ram[write_idx], &msg_ram[i], sizeof(FlashStore_MsgSlot));
+                    memset(&msg_ram[i], 0, sizeof(FlashStore_MsgSlot));
                 }
                 write_idx++;
             }
         }
-        msg_count = write_idx;
+        if (flash_count != actual_count) {
+            msg_count = write_idx;
+        }
     }
+
+    return 1U;
+}
+
+void FlashStore_Init(void)
+{
+    /* Sector 4 is shared by the single receiver and half-duplex projects. */
+    if (flash_load_from(FLASH_STORE_ADDR)) {
+        return;
+    }
+
+    /* One-time compatibility migration for records created by the old Sector 3 layout. */
+    if (flash_load_from(FLASH_STORE_LEGACY_ADDR)) {
+        (void)flash_write_all();
+        return;
+    }
+
+    memset(msg_ram, 0, sizeof(msg_ram));
+    msg_count = 0;
 }
 
 /**

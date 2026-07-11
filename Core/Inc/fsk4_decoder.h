@@ -78,10 +78,15 @@ typedef struct {
     float    q2[FSK4_DECODER_FREQ_COUNT];     /* Goertzel q2 (前一) */
     uint16_t sample_count;                     /* 已处理采样数 (0..N-1) */
     uint16_t block_size;                       /* 窗口大小 (=N) */
+    float    dc_offset;                        /* 当前窗口的动态直流均值 */
 
     /* ── 最近一次检测结果 ── */
     float    magnitude_sq[FSK4_DECODER_FREQ_COUNT];  /* 各频率的 |magnitude|² */
     uint8_t  dominant_digit;                         /* 0~3 = 最强频率, 0xFF = 噪声 */
+    float    last_peak_mag;
+    float    last_second_mag;
+    float    last_peak_ratio;
+    uint16_t last_amplitude;
 } FSK4_Decoder;
 
 /* ========================================================================== */

@@ -3,7 +3,7 @@
   * @file           : flash_store.h
   * @brief          : 内部Flash非易失消息存储 — 声语信使接收端
   *
-  *   使用 STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB) 存储最多
+  *   使用 STM32F411CEU6 内部 Flash Sector 4 (0x08010000, 64KB) 存储最多
   *   5 条已接收短信息。断电后数据不丢失。
   *
   *   存储格式 (大端字节序, word 对齐写入):
@@ -44,8 +44,9 @@ extern "C" {
 /*  常量                                                                       */
 /* ========================================================================== */
 
-#define FLASH_STORE_SECTOR         FLASH_SECTOR_3
-#define FLASH_STORE_ADDR           0x0800C000
+#define FLASH_STORE_SECTOR         FLASH_SECTOR_4
+#define FLASH_STORE_ADDR           0x08010000U
+#define FLASH_STORE_LEGACY_ADDR    0x0800C000U
 #define FLASH_STORE_MAX_MSGS       5
 #define FLASH_STORE_MSG_DATA_LEN   50      /* 最大 48 字符 + null + room */
 #define FLASH_STORE_MAGIC          0x564F4943  /* "VOIC" */

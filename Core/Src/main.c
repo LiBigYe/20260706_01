@@ -73,7 +73,13 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 static void HM_SwitchToRx(void);
+static void HM_SwitchToTxEdit(void);
 static void HM_SwitchToTx(uint16_t target_mask);
+static void HM_StopRxSampling(void);
+static void HM_StartRxSampling(void);
+static void HM_SaveReceivedMessage(void);
+static void HM_DeleteStoredMessage(uint8_t index);
+static void HM_ShowRxFooter(uint8_t source_id, uint8_t char_count, const char *status);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -126,6 +132,32 @@ static uint8_t SelectDeviceId(void)
     }
 }
 
+static void HM_ShowRxFooter(uint8_t source_id, uint8_t char_count, const char *status)
+{
+    uint8_t x = 0U;
+    uint8_t y = 7U * FONT_HEIGHT;
+
+    OLED_ShowChar(x, y, 'F'); x += FONT_WIDTH;
+    OLED_ShowChar(x, y, ':'); x += FONT_WIDTH;
+    OLED_ShowChar(x, y, (source_id >= 1U && source_id <= 9U) ?
+                         (char)('0' + source_id) : '-');
+    x += 2U * FONT_WIDTH;
+    OLED_ShowChar(x, y, 'C'); x += FONT_WIDTH;
+    OLED_ShowChar(x, y, ':'); x += FONT_WIDTH;
+    if (char_count >= 10U) {
+        OLED_ShowChar(x, y, (char)('0' + (char_count / 10U)));
+        x += FONT_WIDTH;
+    }
+    OLED_ShowChar(x, y, (char)('0' + (char_count % 10U)));
+
+    if (status != NULL) {
+        uint8_t status_width = (uint8_t)strlen(status) * FONT_WIDTH;
+        if (status_width <= OLED_WIDTH) {
+            OLED_ShowString(OLED_WIDTH - status_width, y, status);
+        }
+    }
+}
+
 static void ShowTargetSelection(uint16_t target_mask)
 {
     OLED_Clear();
@@ -153,33 +185,72 @@ static void ShowTargetSelection(uint16_t target_mask)
 /*  半双工: RX/TX 模式切换                                                     */
 /* ========================================================================== */
 
+static void HM_StopRxSampling(void)
+{
+    HAL_ADC_Stop_DMA(&hadc1);
+    HAL_TIM_Base_Stop(&htim2);
+    RX_Stop();
+}
+
+static void HM_StartRxSampling(void)
+{
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buf, ADC_BUF_SIZE);
+    HAL_TIM_Base_Start(&htim2);
+    RX_Start();
+}
+
 static void HM_SwitchToRx(void)
 {
     /* 停止 TX 侧 */
     TX_ClearDone();                       /* 停 TIM3 ISR, PWM midscale */
     PWM_DDS_Shutdown();                   /* 停 TIM1 PWM */
-
-    /* 启动 RX 侧 */
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buf, ADC_BUF_SIZE);
-    HAL_TIM_Base_Start(&htim2);           /* TIM2 → ADC trigger */
-    RX_Start();
+    HM_StartRxSampling();
 
     hm_mode = HM_RX;
     /* 不清除编辑器 — 保留已编辑内容, 下次切回 TX 继续用 */
 }
 
+static void HM_SwitchToTxEdit(void)
+{
+    HM_StopRxSampling();
+    hm_mode = HM_TX_EDIT;
+    Editor_SetTxStatus("Tx Ready");
+}
+
 static void HM_SwitchToTx(uint16_t target_mask)
 {
     /* 停止 RX 侧 */
-    HAL_ADC_Stop_DMA(&hadc1);
-    HAL_TIM_Base_Stop(&htim2);
-    RX_Stop();
+    HM_StopRxSampling();
 
     /* 启动 TX 侧 */
     PWM_DDS_Start();                      /* TIM1 PWM */
     TX_Start(Editor_GetBuffer(), g_device_id, target_mask);
 
     hm_mode = HM_TX_BUSY;
+}
+
+
+static void HM_SaveReceivedMessage(void)
+{
+    uint8_t source_id = RX_GetSourceId();
+    uint8_t length = RX_GetMessageLength();
+    const char *message = RX_GetMessage();
+
+    /* Flash 擦写会阻塞取指；暂停采样但保留 DONE 和消息缓冲供界面显示。 */
+    HAL_ADC_Stop_DMA(&hadc1);
+    HAL_TIM_Base_Stop(&htim2);
+    FlashStore_SaveMessageFrom(source_id, message, length);
+}
+
+static void HM_DeleteStoredMessage(uint8_t index)
+{
+    if (RX_IsFrameActive()) {
+        return;
+    }
+
+    HM_StopRxSampling();
+    FlashStore_DeleteMessage(index);
+    HM_StartRxSampling();
 }
 
 /* ── ADC DMA 回调 (RX 模式专用) ── */
@@ -301,6 +372,8 @@ int main(void)
   uint8_t  browse_cursor  = 0;
   uint8_t  view_scroll    = 0;
   uint8_t  last_key_del   = 0;
+  uint32_t last_user_activity_tick = HAL_GetTick();
+  const uint32_t oled_idle_timeout_ms = 20000U;
 
   while (1)
   {
@@ -320,6 +393,11 @@ int main(void)
     }
 
     uint8_t key = Keyboard_Scan();
+    uint32_t now_tick = HAL_GetTick();
+    if (key != KEY_NONE || RX_IsFrameActive() || RX_IsDone()) {
+        last_user_activity_tick = now_tick;
+        OLED_SetDisplay(1U);
+    }
 
     /* ═══════════════════════════════════════════════════════ */
     /*  RX 接收模式                                              */
@@ -330,9 +408,8 @@ int main(void)
         if (key == KEY_FN) {
             if (ls_mode != LS_LISTENING) {
                 ls_mode = LS_LISTENING;
-            } else {
-                hm_mode = HM_TX_EDIT;
-                Editor_SetTxStatus("Tx Ready");
+            } else if (!RX_IsFrameActive()) {
+                HM_SwitchToTxEdit();
             }
             last_tick = 0;
             continue;
@@ -343,23 +420,22 @@ int main(void)
             if (ls_mode == LS_LISTENING) {
                 ls_mode       = LS_BROWSE_LIST;
                 browse_cursor = 0;
-            } else if (ls_mode == LS_BROWSE_VIEW) {
-                ls_mode     = LS_BROWSE_LIST;
-                view_scroll = 0;
+                last_tick     = 0;
             }
         }
 
         /* ── T9 键 → 进入编辑发信 (退出浏览) ── */
-        if (key >= KEY_0 && key <= KEY_9) {
+        if (ls_mode == LS_LISTENING && key >= KEY_0 && key <= KEY_9 &&
+            !RX_IsFrameActive()) {
             ls_mode = LS_LISTENING;
-            hm_mode = HM_TX_EDIT;
+            HM_SwitchToTxEdit();
             Editor_HandleKey(key);
-            Editor_SetTxStatus("Tx Ready");
             continue;
         }
 
         /* ── 接收完成: 2s 显示 → 自动重启 ── */
         if (RX_IsDone()) {
+            HM_SaveReceivedMessage();
             const char *rx_msg = RX_GetMessage();
             uint8_t    rx_len  = RX_GetMessageLength();
             uint8_t rls[50], rll[50], rtl = 0; uint16_t rp = 0;
@@ -382,16 +458,11 @@ int main(void)
                 for (uint8_t c = 0; c < rll[li]; c++)
                     OLED_ShowChar(c * FONT_WIDTH, py, rx_msg[rls[li] + c]);
             }
-            char cbuf[12];
-            snprintf(cbuf, sizeof(cbuf), "F:%u C:%u", RX_GetSourceId(), rx_len);
-            OLED_ShowString(0, 7 * FONT_HEIGHT, cbuf);
-            const char *done_status = "Rx Complete";
-            OLED_ShowString(OLED_WIDTH - (uint8_t)strlen(done_status) * FONT_WIDTH,
-                            7 * FONT_HEIGHT, done_status);
+            HM_ShowRxFooter(RX_GetSourceId(), rx_len, "Rx Complete");
             OLED_Refresh();
             HAL_Delay(2000);
             RX_ClearDone();
-            RX_Start();
+            HM_StartRxSampling();
             last_tick = 0;
         }
 
@@ -400,6 +471,7 @@ int main(void)
         uint8_t  refresh = 0;
         if ((tick - last_tick) >= 200) refresh = 1;
 
+        if (ls_mode == LS_LISTENING) {
         const char *msg = RX_GetDisplayMessage();
         uint8_t mlen = RX_GetDisplayLength();
         uint8_t ls[50], ll[50], tl = 0; uint16_t p = 0;
@@ -432,12 +504,9 @@ int main(void)
                     OLED_ShowChar(c * FONT_WIDTH, py, msg[ls[li] + c]);
             }
             const char *st = RX_GetStatusString();
-            char cbuf2[12];
-            snprintf(cbuf2, sizeof(cbuf2), "F:%u C:%u", RX_GetDisplaySourceId(), mlen);
-            OLED_ShowString(0, 7 * FONT_HEIGHT, cbuf2);
-            OLED_ShowString(OLED_WIDTH - (uint8_t)strlen(st) * FONT_WIDTH,
-                            7 * FONT_HEIGHT, st);
+            HM_ShowRxFooter(RX_GetDisplaySourceId(), mlen, st);
             OLED_Refresh();
+        }
         }
 
         /* ═══════════════════════════════════════════════════ */
@@ -464,15 +533,17 @@ int main(void)
             uint8_t key_del_edge = key_del_now && !last_key_del;
             last_key_del = key_del_now;
             if (key_del_edge && count > 0) {
-                FlashStore_DeleteMessage(browse_cursor);
+                HM_DeleteStoredMessage(browse_cursor);
                 count = FlashStore_GetCount();
                 if (count > 0 && browse_cursor >= count)
                     browse_cursor = count - 1;
+                nav_changed = 1;
             }
 
-            if (key >= KEY_0 && key <= KEY_9 && count > 0) {
+            if (key == KEY_SEND && count > 0) {
                 ls_mode     = LS_BROWSE_VIEW;
                 view_scroll = 0;
+                last_tick   = 0;
             }
 
             if (refresh || nav_changed) {
@@ -502,7 +573,7 @@ int main(void)
                     }
                 }
                 OLED_ShowString(0, 7 * FONT_HEIGHT,
-                                "[英/数]Back [发送]View");
+                                "[Mode]Back [Send]View");
                 OLED_Refresh();
             }
         }
@@ -555,14 +626,23 @@ int main(void)
                             OLED_ShowChar(c * FONT_WIDTH, py, slot->data[vls[li] + c]);
                     }
                     OLED_ShowString(0, 7 * FONT_HEIGHT,
-                                    "[发送]Back [L/R]Scroll");
+                                    "[Mode]List L/R=Scroll");
                     OLED_Refresh();
                 }
             }
         }
 
         if (refresh) last_tick = tick;
-        HAL_Delay(10);
+        if (ls_mode == LS_LISTENING && key == KEY_NONE && !RX_IsFrameActive() &&
+            !RX_IsDone() && (now_tick - last_user_activity_tick) >= oled_idle_timeout_ms) {
+            OLED_SetDisplay(0U);
+        }
+        if (ls_mode == LS_LISTENING && key == KEY_NONE && !RX_IsFrameActive() &&
+            !RX_IsDone()) {
+            __WFI();
+        } else {
+            HAL_Delay(10);
+        }
     }
 
     /* ═══════════════════════════════════════════════════════ */
@@ -960,7 +1040,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
