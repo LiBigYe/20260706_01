@@ -333,6 +333,8 @@ int main(void)
   HAL_Delay(50);
 
   OLED_Init(&hi2c1);
+  OLED_ShowStartupScreen();
+  HAL_Delay(2000);
   Keyboard_Init();
 
   while (HAL_GPIO_ReadPin(POWER_BUTTON_GPIO_Port, POWER_BUTTON_Pin) == GPIO_PIN_RESET) {
@@ -351,15 +353,6 @@ int main(void)
 
   /* 首次启动 TIM3 (transmitter.c 的 TX_ClearDone 会停止它) */
   HAL_TIM_Base_Start_IT(&htim3);
-
-  /* 开机画面 */
-  OLED_ShowString(12, 0,  "Voice Messenger");
-  char id_line[22];
-  snprintf(id_line, sizeof(id_line), "Half-Duplex ID:%u", g_device_id);
-  OLED_ShowString(0, 16, id_line);
-  OLED_ShowString(0, 32, "Rx: Stand By");
-  OLED_Refresh();
-  HAL_Delay(500);
 
   /* 默认进入 RX 模式 */
   hm_mode = HM_RX;

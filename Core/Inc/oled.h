@@ -36,6 +36,7 @@ void OLED_ShowCharInvert(uint8_t x, uint8_t y, char ch);
 void OLED_ShowString(uint8_t x, uint8_t y, const char *str);
 void OLED_ShowStringInvert(uint8_t x, uint8_t y, const char *str);
 void OLED_Refresh(void);
+void OLED_ShowStartupScreen(void);
 void OLED_SetDisplay(uint8_t enabled);
 uint8_t OLED_IsDisplayEnabled(void);
 
