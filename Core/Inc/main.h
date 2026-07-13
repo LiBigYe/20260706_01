@@ -80,6 +80,8 @@ extern uint8_t g_device_id;
 #define LEDG_GPIO_Port GPIOB
 #define LEDR_Pin GPIO_PIN_10
 #define LEDR_GPIO_Port GPIOB
+#define PGA112_CS_Pin GPIO_PIN_12
+#define PGA112_CS_GPIO_Port GPIOB
 #define KB_COL0_Pin GPIO_PIN_9
 #define KB_COL0_GPIO_Port GPIOA
 #define KB_COL1_Pin GPIO_PIN_10
@@ -88,6 +90,8 @@ extern uint8_t g_device_id;
 #define KB_COL2_GPIO_Port GPIOA
 #define KB_COL3_Pin GPIO_PIN_12
 #define KB_COL3_GPIO_Port GPIOA
+#define DAC_CS_Pin GPIO_PIN_15
+#define DAC_CS_GPIO_Port GPIOA
 #define POWER_CTRL_Pin GPIO_PIN_8
 #define POWER_CTRL_GPIO_Port GPIOB
 

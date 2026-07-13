@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file           : transmitter.h
-  * @brief          : 4-FSK 发送状态机 — 声语信使项目 (PWM+DDS 版, v4)
+  * @brief          : 4-FSK 发送状态机 — 声语信使项目 (MCP4921 DAC DDS 版, v4)
   *
   *   状态转换:
   *     IDLE → PREAMBLE(200ms) → DATA(12地址+192正文符号) → CHECKSUM(4符号)
@@ -11,7 +11,7 @@
   *     符号 = 20 ms tone + 10 ms guard = 480 ticks
   *     帧  = 前导 + N×480 + 结束
   *
-  *   v4 关键设计: 10ms guard 输出 DC 1.65V (PWM_DDS_OutputMidscale),
+  *   v4 关键设计: 10ms guard 输出 DC 1.65V (DAC_MCP4921_OutputMidscale),
   *   形成交流能量真空期. 接收端 v4 DPLL 利用 5ms 切片
   *   检测下降沿 [HI,HI,LO] 实现物理层符号定时恢复.
   *   门限 25000 免疫 PWM 48.83kHz 载波纹波穿透.

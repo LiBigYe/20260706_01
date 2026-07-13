@@ -1,11 +1,11 @@
 /**
   ******************************************************************************
   * @file           : transmitter.c
-  * @brief          : 4-FSK 发送状态机实现 (PWM+DDS 版, v4)
+  * @brief          : 4-FSK 发送状态机实现 (MCP4921 DAC DDS 版, v4)
   *
   *   时序 (16 kHz tick = 62.5 us):
   *     每符号   = 20 ms tone  = 320 ticks
-  *     保护间隔 = 10 ms guard = 160 ticks (PWM 输出 DC 1.65V)
+  *     保护间隔 = 10 ms guard = 160 ticks (DAC 输出 DC 1.65V)
   *     每符号槽 = 30 ms       = 480 ticks
   *
   *   前导码: 200ms, 1500/3000Hz 每 40ms 交替 (无保护间隔)
@@ -13,9 +13,9 @@
   *
   *   v4 设计要点: 10ms guard 确保接收端 5ms 切片总能捕获 >=1 个纯净 LO 块.
  *   接收端 v4 DPLL 利用下降沿 [HI,HI,LO] 实现符号定时恢复,
- *   能量门限 25000 免疫 PWM 48.83kHz 载波纹波穿透. ≥1 个纯净 LO 块.
+ *   能量门限 25000 免疫 DAC 阶梯输出不会引入 PWM 载波纹波. ≥1 个纯净 LO 块.
   *   接收端 v4 DPLL 利用下降沿 [HI,HI,LO] 实现符号定时恢复,
-  *   能量门限 25000 免疫 PWM 48.83kHz 载波纹波穿透.
+  *   能量门限 25000 免疫 DAC 阶梯输出不会引入 PWM 载波纹波.
   *
   *   每字符: 4 个 base-4 符号 (索引 0~73 → 4^4 = 256)
   *   48 字符: 192 数据符号 + 4 校验符号 = 196 符号
@@ -25,12 +25,12 @@
   *
   *   由 TIM3 ISR (16kHz) 驱动:
   *     TIM3_IRQHandler → HAL_TIM_IRQHandler
-  *     → HAL_TIM_PeriodElapsedCallback → TX_Tick → PWM_DDS_Tick
+  *     → HAL_TIM_PeriodElapsedCallback → TX_Tick → DAC_MCP4921_Tick
   ******************************************************************************
   */
 
 #include "transmitter.h"
-#include "pwm_dds.h"
+#include "dac_mcp4921.h"
 #include <string.h>
 
 /* ========================================================================== */
@@ -73,7 +73,7 @@ static const char *state_names[6] = {
   */
 static void TX_SetSymbol(uint8_t digit)
 {
-    PWM_DDS_SetFreq(digit);
+    DAC_MCP4921_SetFreq(digit);
     tx_slot_tick = 0;
 }
 
@@ -82,7 +82,7 @@ static void TX_SetSymbol(uint8_t digit)
   */
 static void TX_EnterGuard(void)
 {
-    PWM_DDS_OutputMidscale();
+    DAC_MCP4921_OutputMidscale();
 }
 
 /* ========================================================================== */
@@ -113,6 +113,8 @@ void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
     tx_slot_tick    = 0;
     tx_pilot_phase  = 0;
     tx_done_flag    = 0;
+
+    DAC_MCP4921_Start();
 
     /* 初始频率: 前导 LO = 1500 Hz */
     TX_SetSymbol(FSK4_PILOT_LO);
@@ -198,15 +200,15 @@ void TX_Tick(void)
             /* 设置 PWM 为中值, 并显式调用 Tick 确保输出生效.
              * OutputMidscale 已直接写 CCR1=512, 此处 Tick 为
              * 一致性调用 (phase_inc=0, phase_acc=0 → idx=0 → 512). */
-            PWM_DDS_OutputMidscale();
-            PWM_DDS_Tick();
+            DAC_MCP4921_OutputMidscale();
+            DAC_MCP4921_Tick();
             return;
         }
         break;
     }
 
     /* 每个 tick 输出一个 DDS 采样点 → PWM 占空比更新 */
-    PWM_DDS_Tick();
+    DAC_MCP4921_Tick();
 
     tx_tick++;
     tx_slot_tick++;
@@ -234,8 +236,8 @@ void TX_ClearDone(void)
     /* 发送结束或取消，熄灭红色发送指示灯 */
     HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 
-    /* 确保 PWM 输出回到中值 50% 占空比 (1.65V DC) */
-    PWM_DDS_OutputMidscale();
+    /* 确保 DAC 输出回到中值 1.65V DC。 */
+    DAC_MCP4921_OutputMidscale();
 
     /* 停止 TIM3 中断: 彻底消除状态机在后台泄漏的任何可能性.
      * 下一次 TX_Start() 会重新启动. */

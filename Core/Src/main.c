@@ -16,7 +16,7 @@
 #include "oled.h"
 #include "keyboard.h"
 #include "editor.h"
-#include "pwm_dds.h"
+#include "dac_mcp4921.h"
 #include "transmitter.h"
 #include "receiver.h"
 #include "flash_store.h"
@@ -43,6 +43,8 @@ DMA_HandleTypeDef hdma_adc1;
 I2C_HandleTypeDef hi2c1;
 
 SPI_HandleTypeDef hspi1;
+SPI_HandleTypeDef hspi2;
+SPI_HandleTypeDef hspi3;
 
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
@@ -74,6 +76,8 @@ static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_SPI2_Init(void);
+static void MX_SPI3_Init(void);
 /* USER CODE BEGIN PFP */
 static void HM_SwitchToRx(void);
 static void HM_SwitchToTxEdit(void);
@@ -207,7 +211,7 @@ static void HM_SwitchToRx(void)
 {
     /* 停止 TX 侧 */
     TX_ClearDone();                       /* 停 TIM3 ISR, PWM midscale */
-    PWM_DDS_Shutdown();                   /* 停 TIM1 PWM */
+    DAC_MCP4921_Shutdown();                   /* 关闭外置 DAC 输出 */
     HM_StartRxSampling();
 
     hm_mode = HM_RX;
@@ -227,7 +231,6 @@ static void HM_SwitchToTx(uint16_t target_mask)
     HM_StopRxSampling();
 
     /* 启动 TX 侧 */
-    PWM_DDS_Start();                      /* TIM1 PWM */
     TX_Start(Editor_GetBuffer(), g_device_id, target_mask);
 
     hm_mode = HM_TX_BUSY;
@@ -323,6 +326,8 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_SPI1_Init();
+  MX_SPI2_Init();
+  MX_SPI3_Init();
   /* USER CODE BEGIN 2 */
 
   HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
@@ -346,7 +351,7 @@ int main(void)
 
   Editor_Init();
 
-  PWM_DDS_Init(&htim1);
+  DAC_MCP4921_Init(&hspi3);
   TX_Init();
   FlashStore_Init();
   RX_Init();
@@ -386,7 +391,7 @@ int main(void)
         HAL_TIM_Base_Stop(&htim2);
         HAL_TIM_Base_Stop_IT(&htim3);
         RX_Stop();
-        PWM_DDS_Shutdown();
+        DAC_MCP4921_Shutdown();
         HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
         OLED_Clear();
@@ -744,7 +749,7 @@ int main(void)
             HAL_Delay(1500);
             /* 发完回到编辑模式, 保留编辑器内容 (与发送端单工一致) */
             TX_ClearDone();
-            PWM_DDS_Shutdown();
+            DAC_MCP4921_Shutdown();
             hm_mode = HM_TX_EDIT;
             transition_key_lock = 1U;
             Editor_SetTxStatus("Tx Ready");
@@ -929,6 +934,82 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI2_Init(void)
+{
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
+  hspi2.Instance = SPI2;
+  hspi2.Init.Mode = SPI_MODE_MASTER;
+  hspi2.Init.Direction = SPI_DIRECTION_1LINE;
+  hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi2.Init.NSS = SPI_NSS_SOFT;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi2.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
+
+}
+
+/**
+  * @brief SPI3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI3_Init(void)
+{
+
+  /* USER CODE BEGIN SPI3_Init 0 */
+
+  /* USER CODE END SPI3_Init 0 */
+
+  /* USER CODE BEGIN SPI3_Init 1 */
+
+  /* USER CODE END SPI3_Init 1 */
+  /* SPI3 parameter configuration*/
+  hspi3.Instance = SPI3;
+  hspi3.Init.Mode = SPI_MODE_MASTER;
+  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi3.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi3.Init.NSS = SPI_NSS_SOFT;
+  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi3.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI3_Init 2 */
+
+  /* USER CODE END SPI3_Init 2 */
 
 }
 
@@ -1136,15 +1217,13 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, KB_ROW0_Pin|KB_ROW1_Pin|KB_ROW2_Pin|KB_ROW3_Pin
-                          |F_CS_Pin, GPIO_PIN_SET);
+                          |F_CS_Pin|DAC_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LEDG_Pin|LEDR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
-  /* 旧 PC13 指示灯不再参与收发状态，固定关闭。 */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, PGA112_CS_Pin|POWER_CTRL_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
@@ -1160,12 +1239,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : F_CS_Pin */
-  GPIO_InitStruct.Pin = F_CS_Pin;
+  /*Configure GPIO pins : F_CS_Pin DAC_CS_Pin */
+  GPIO_InitStruct.Pin = F_CS_Pin|DAC_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(F_CS_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : POWER_BUTTON_Pin */
   GPIO_InitStruct.Pin = POWER_BUTTON_Pin;
@@ -1179,6 +1258,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PGA112_CS_Pin */
+  GPIO_InitStruct.Pin = PGA112_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(PGA112_CS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : KB_COL0_Pin KB_COL1_Pin KB_COL2_Pin KB_COL3_Pin */
   GPIO_InitStruct.Pin = KB_COL0_Pin|KB_COL1_Pin|KB_COL2_Pin|KB_COL3_Pin;

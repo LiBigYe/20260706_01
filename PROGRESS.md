@@ -232,3 +232,9 @@ STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB)
 - 根据实物屏可读性反馈，将首行调整为 16x16 大字“声语信使 通8-1”；标题总宽108像素，居中起点x=10。
 - 成员姓名与学号保留为三行12x12内容，起点y分别为20、34、48，确保完整显示在64像素高度内。
 - Debug构建通过：FLASH 56932B，RAM 10384B。
+
+## 2026-07-13 - MCP4921 外置 DAC 发射
+- 已保留 SPI1 外部 Flash；SPI2 仅预留给未接入的 PGA112，当前业务代码不调用 SPI2。
+- 新增 `dac_mcp4921.c/h`，使用 SPI3 PB3/SCK、PB5/MOSI 和 PA15/DAC_CS 向 MCP4921 写入 16-bit 命令；LDAC 需硬件接地。
+- 半双工 TX 状态使用 MCP4921 输出 4-FSK；切回 RX 与关机时令 DAC 进入关断高阻，不改变 ADC 接收、熄屏唤醒和存储逻辑。
+- 旧 `pwm_dds.c` 不再参与 CMake 构建；TIM1 不再启动 PWM 输出。Debug构建通过：FLASH 55644B，RAM 10560B。

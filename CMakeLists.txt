@@ -49,7 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/keyboard.c
     Core/Src/py25q64.c
     Core/Src/editor.c
-    Core/Src/pwm_dds.c
+    Core/Src/dac_mcp4921.c
     Core/Src/transmitter.c
     Core/Src/fsk4_encoder.c
     Core/Src/fsk16_encoder.c
