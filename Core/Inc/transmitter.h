@@ -41,11 +41,10 @@ extern "C" {
 
 #define TX_STATE_IDLE        0
 #define TX_STATE_PREAMBLE    1
-#define TX_STATE_DATA        2
-#define TX_STATE_CHECKSUM    3
+#define TX_STATE_SYNC        2
+#define TX_STATE_DATA        3
 #define TX_STATE_POSTAMBLE   4
 #define TX_STATE_DONE        5
-
 /* ========================================================================== */
 /*  API                                                                        */
 /* ========================================================================== */

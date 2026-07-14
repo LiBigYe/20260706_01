@@ -56,6 +56,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/receiver.c
     Core/Src/fsk4_decoder.c
     Core/Src/flash_store.c
+    Core/Src/voice_fec.c
+    Core/Src/voice_dsp.c
 )
 
 # Add include paths
