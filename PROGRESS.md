@@ -336,3 +336,11 @@ main.c / OLED / 键盘 / 编辑器 / Flash 存储 / 设备编号 / 地址过滤 
   否则一进接收模式整机断电. 本设计的收发隔离靠软件启停 ADC/DMA/TIM 完成,
   硬件上没有独立的 mic/功放使能引脚 (.ioc 中 GPIO 输出仅 键盘行/F_CS/LEDR/LEDG/
   POWER_CTRL/LED, 无音频开关). 因此不修改任何 POWER_CTRL 相关逻辑.
+
+## 2026-07-14 (补) — 1500Hz 频响补偿加权
+
+- 声学链路(扬声器+RC低通+麦克风+运放)对 1500Hz 增益偏低, 使 digit0 的 Goertzel 幅度天生弱于其它三音.
+- 在 voice_dsp.c 新增 vd_freq_weight[4]={1.25f,1.0f,1.0f,1.0f}, 在 VoiceDSP_Classify 里对每个频点的 mag² 乘权.
+- 1500Hz 判决量×1.25 (“别人1倍、它1.25倍”再比), 同时影响主/次频选择与置信度 ratio.
+- PC 验证: 1500 弱信号稳定解为 digit0; 1800Hz 不会被误偷为 1500; 全链路/仿真/幽灵测试均通过. 实测若仍偏弱可继续上调 vd_freq_weight[0].
+- 三工程 voice_dsp.c 逐字节一致 (01 为 TX 不编译该文件, 无害).

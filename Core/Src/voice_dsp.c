@@ -32,12 +32,19 @@ static uint32_t vd_grid_start;     /* 数据符号 0 的 tone 起点 */
 /* 目标频率在 N=160 窗口下的中心 bin */
 static const int vd_center_k[4] = {15, 18, 21, 24};  /* 1500/1800/2100/2400 @160 */
 
+/* 频响补偿权重 (作用于 Goertzel 幅度²):
+ * 声学链路 (扬声器+RC低通+麦克风+运放) 对 1500Hz 增益偏低, 使 digit0 的
+ * 幅度天生弱于其它三音, 判决时吃亏. 给 1500Hz 的判决量(mag²)加权 1.25,
+ * 即"别人 1 倍、它 1.25 倍"再一起比较. 同时影响主/次频选择与置信度.
+ * 实测若仍偏弱可继续上调 vd_freq_weight[0]. */
+static const float vd_freq_weight[4] = {1.25f, 1.0f, 1.0f, 1.0f};
+
 /* ---- 唤醒能量门限 (自适应, 仅用于"唤醒提示", 真正判决靠频谱置信度) ----
  * 复核缺陷 1/3 对策: 能量门限只做低成本唤醒, 取 noise×1.5, 让弱信号也能
  * 进入 PREAMBLE; 误唤醒由后续导频交替 + 同步音置信度 (裕量数百倍) 自然拒绝. */
 #define VD_EN_FLOOR_INIT   400U
 #define VD_EN_MARGIN       500U
-#define VD_EN_MIN         2000U     /* 差分能量最小唤醒门限 (抬高: 抗静态噪声/EMI 幽灵唤醒) */
+#define VD_EN_MIN          800U     /* 差分能量最小唤醒门限 (按用户要求回退 2000→800) */
 #define VD_STARTUP_QUIET    15U     /* ~75ms 静稳 (缩短以降低首帧竞态窗口) */
 
 /* ---- 前导/同步参数 (样本) ---- */
@@ -84,7 +91,8 @@ uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N, float *conf_out)
     float dc = (float)sum / (float)N;
 
     float mag[4];
-    for (int i = 0; i < 4; i++) mag[i] = freq_mag2(win, (int)N, vd_center_k[i], dc);
+    for (int i = 0; i < 4; i++)
+        mag[i] = freq_mag2(win, (int)N, vd_center_k[i], dc) * vd_freq_weight[i];
 
     int best = 0; float bestv = mag[0], second = 0.0f;
     for (int i = 1; i < 4; i++) if (mag[i] > bestv) { bestv = mag[i]; best = i; }
