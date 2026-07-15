@@ -344,3 +344,52 @@ main.c / OLED / 键盘 / 编辑器 / Flash 存储 / 设备编号 / 地址过滤 
 - 1500Hz 判决量×1.25 (“别人1倍、它1.25倍”再比), 同时影响主/次频选择与置信度 ratio.
 - PC 验证: 1500 弱信号稳定解为 digit0; 1800Hz 不会被误偷为 1500; 全链路/仿真/幽灵测试均通过. 实测若仍偏弱可继续上调 vd_freq_weight[0].
 - 三工程 voice_dsp.c 逐字节一致 (01 为 TX 不编译该文件, 无害).
+
+## 2026-07-14 (补2) — 接收端第二级放大改用 PGA112 + ADC 反馈 AGC
+
+第二级放大 (进 ADC 前) 换成 TI PGA112 可编程增益放大器, 由 MCU 经 SPI2 控制增益,
+并根据 ADC 采样做自动增益 (AGC). 接收端 02 与半双工 06 同步实现.
+
+**硬件 (CubeMX 已配, 未改引脚定义)**:
+- SPI2: PB13=SCK, PB15=MOSI (Simplex_Bidirectional_Master, 只发不收), Mode0/MSB/8bit.
+- CS: PB12 (PG112_CS), 软件控制, 默认 High.
+
+**新增 `pga112.c/.h`** (已加入两工程 CMakeLists):
+- PGA112_Init(): 上电复位 + 设初始增益 8x (用户选定).
+- PGA112_SetGain(code): 经 SPI2 盲写 {0x2A, (gain<<4)|CH0}.
+- PGA112_AGC_Update(samples, len, frame_active): 在 ADC HT/TC 回调里调用.
+  - 削顶保护 (触及量程两端 <64 counts) → 即时降一档;
+  - 幅度过高 (单边 ≥1680) → 降档; 持续过低 (单边 ≤450, 连续 8 块) → 升档;
+  - 目标窗口 ~22%~82% 满量程, 带迟滞;
+  - **仅监听态调增益, RX_IsFrameActive() 为真 (PREAMBLE/DATA) 时冻结** —
+    避免帧中途增益跳变干扰 v5 差分能量/频谱同步.
+- 增益档 0..7 = 1/2/4/8/16/32/64/128 倍 (PGA112 binary).
+
+**与 v5 判决互补**: v5 用频谱置信度判频 (不看绝对幅值), AGC 只负责把信号维持在
+ADC 动态范围的合理区间 (近距离不削顶, 远距离不淹没于量化噪声), 二者不冲突.
+
+**⚠ 协议常量待手册确认**: 命令字节 0x2A、增益/通道位序 (高4增益/低4通道)、
+通道 CH0=0、SPI Mode0 均按 TI PGA112 标准数据手册; 若实测手册不同, 改 pga112.h 顶部宏即可.
+
+**PC 验证**: AGC 决策逻辑单元测试全过 (init 8x/SPI 字节 0x2A+0x30、削顶降档、
+锁帧冻结、过高降档、持续弱升档、窗口内迟滞、min/max 钳位); pga112.c 用真实工程
+头文件编译 0 error. 无 arm-none-eabi 未生成 ELF, **待真机验证 SPI 波形与增益档实际倍率**.
+
+**同批修复 (git 误操作损坏)**: 本次发现 git 回退/清理把接收端多个文件截断损坏,
+已全部恢复: 02 的 main.c/main.h/fsk4_decoder.c/.h/stm32f4xx_hal_msp.c 及被删的
+voice_proto.h/voice_fec.c/.h/voice_dsp.c/.h; 06 的 main.c/main.h/hal_msp.c/pwm_dds.h
+(06 从其 git HEAD 恢复, 02 从半双工 06 的完好副本恢复). 恢复后逐文件校验完整.
+
+## 2026-07-14 (补3) — PGA112 数据手册核对 + 命令修正
+
+对照接收端文件夹内 pga112.pdf (TI SBOS424C) 核对协议, 修正一处错误:
+- **删除伪造的 reset 命令 0x20** (手册中不存在). 上电 POR 后增益/通道寄存器本为
+  全 0 (增益=1, 通道=VCAL/CH0), 无需 reset. Init 改为发 SDN_DIS (0xE1 0x00) 退出
+  关机模式再写增益.
+- **WRITE 命令确认无误**: 高字节 0x2A, 低字节 = [G3G2G1G0(高4)] | [CH3CH2CH1CH0(低4)] (Table 3).
+- **增益码确认**: binary 增益 0..7 = 1/2/4/8/16/32/64/128; 8x = 码 3 (Table 5).
+- **通道确认**: 信号接 VCAL/CH0 (第3脚), 通道码 = 0x0 (Table 6). 8x+CH0 低字节 = 0x30.
+- **SPI 时序确认**: Mode 0 (CPOL=0 空闲低, CPHA=0 上升沿采样); CS 低有效; CS 拉低到
+  拉高间须为 16 时钟整数倍 (我们发 2 字节=16bit, 满足); 最大 SCLK 10MHz (我们 ~1.5MHz).
+  → 与 CubeMX 现有 SPI2 配置 (Mode0/MSB/8bit) 完全一致, 无需改 CubeMX.
+- pga112.h 顶部宏已按手册标注来源 (Table 3/5/6). AGC 单元测试全过, 两工程编译 0 error.

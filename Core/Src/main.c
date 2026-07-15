@@ -21,6 +21,7 @@
 #include "receiver.h"
 #include "flash_store.h"
 #include "network_protocol.h"
+#include "pga112.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -264,6 +265,8 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1 && hm_mode == HM_RX) {
         RX_ProcessHalfBuffer(adc_dma_buf);
+        /* PGA112 AGC: 只在未锁帧时调增益, 锁帧期间冻结 (不扰同步) */
+        PGA112_AGC_Update(adc_dma_buf, RX_BLOCK_SIZE, RX_IsFrameActive());
     }
 }
 
@@ -271,6 +274,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1 && hm_mode == HM_RX) {
         RX_ProcessHalfBuffer(adc_dma_buf + RX_BLOCK_SIZE);
+        /* PGA112 AGC: 只在未锁帧时调增益, 锁帧期间冻结 (不扰同步) */
+        PGA112_AGC_Update(adc_dma_buf + RX_BLOCK_SIZE, RX_BLOCK_SIZE, RX_IsFrameActive());
     }
 }
 
@@ -331,6 +336,9 @@ int main(void)
   HAL_GPIO_WritePin(POWER_CTRL_GPIO_Port, POWER_CTRL_Pin, GPIO_PIN_SET);
   /* 旧 PC13 指示灯不再参与收发状态，固定关闭。 */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+
+  /* PGA112 第二级可编程增益: 复位 + 设初始增益 8x (SPI2, CS=PB12) */
+  PGA112_Init();
 
   /* 冷启动延时: 等 OLED VDD 稳定 (手册要求 1-50ms) */
   HAL_Delay(50);
