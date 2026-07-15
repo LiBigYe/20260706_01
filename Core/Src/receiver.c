@@ -165,10 +165,27 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
 
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
         const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
-        /* AGC 先调增益 (按当前 vrx 状态判定是否为帧内), 再推进 DSP */
-        PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE,
-                          (vrx.state == VD_PREAMBLE || vrx.state == VD_DATA));
-        /* 每子块跟踪 vrx.state 变化, 捕捉中途跨态 (灯只在数据段亮) */
+
+        /* ========================================================= */
+        /* 状态驱动的冻结式 AGC 调度策略                               */
+        /* ========================================================= */
+        if (vrx.state == VD_LISTEN) {
+            /* 待机态: 死锁在 32x, 防止突发巨响降增益后无法恢复 (致聋) */
+            if (PGA112_GetGain() != PGA_GAIN_INIT_CODE) {
+                PGA112_SetGain(PGA_GAIN_INIT_CODE);
+                PGA112_AGC_Reset();
+            }
+        } else if (vrx.state == VD_PREAMBLE) {
+            /* 前导态: 激活 AGC, 允许飙升至 128x, 迅速咬住远距离信号 */
+            PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, 1U);
+        }
+        /* 数据态 (VD_DATA) 及其他: 跳过 AGC, 绝对冻结增益.
+           严禁在符号解调期间改变波形振幅 — 阶跃信号的全频段能量泄露
+           会瞬间拉高 Goertzel 次强幅度, 摧毁置信度判决, 导致符号
+           大面积擦除为 0xFF. */
+        /* ========================================================= */
+
+        /* 将子块推入 DSP, 传入当前真实的物理增益码供能量归一化使用 */
         uint8_t was_data = (vrx.state == VD_DATA);
         uint8_t done = VoiceRx_PushBlock(&vrx, sub, PGA112_GetGain());
         rx_last_digit = vrx.last_digit;

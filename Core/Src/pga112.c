@@ -67,6 +67,7 @@ uint8_t PGA112_AGC_Update(const uint16_t *samples, uint16_t len, uint8_t frame_a
     uint32_t rms2_high = (uint32_t)AGC_RMS_HIGH * AGC_RMS_HIGH;
     uint32_t rms2_low  = (uint32_t)AGC_RMS_LOW  * AGC_RMS_LOW;
 
+    /* clip protection (always immediate, single step) */
     if (clipped) {
         agc_hi_hold = 0U; agc_lo_hold = 0U;
         if (g_pga_gain_live > PGA_GAIN_MIN_CODE) {
@@ -76,6 +77,7 @@ uint8_t PGA112_AGC_Update(const uint16_t *samples, uint16_t len, uint8_t frame_a
         return 0U;
     }
 
+    /* locked-frame Vpp check: push toward 1.5~2.8Vpp, single step only */
     if (frame_active && vpp_raw > 0U) {
         uint32_t vpp_mv = (uint32_t)vpp_raw * 3300U / 4095U;
         if (vpp_mv < AGC_VPP_LOW) {
@@ -92,6 +94,7 @@ uint8_t PGA112_AGC_Update(const uint16_t *samples, uint16_t len, uint8_t frame_a
         }
     }
 
+    /* RMS too high -> step down (always allowed, including listening) */
     if (rms2 >= rms2_high) {
         agc_lo_hold = 0U;
         if (agc_hi_hold < 0xFFFFU) agc_hi_hold++;
@@ -105,7 +108,8 @@ uint8_t PGA112_AGC_Update(const uint16_t *samples, uint16_t len, uint8_t frame_a
         return 0U;
     }
 
-    if (rms2 <= rms2_low) {
+    /* RMS too low -> step up. ONLY in locked frame (prevents noise ramp to 128x in listening) */
+    if (frame_active && rms2 <= rms2_low) {
         agc_hi_hold = 0U;
         if (agc_lo_hold < 0xFFFFU) agc_lo_hold++;
         if (agc_lo_hold >= AGC_HOLD_BLOCKS) {

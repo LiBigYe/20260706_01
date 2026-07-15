@@ -171,7 +171,47 @@ receiver.c / voice_fec.c / voice_dsp.c):
 | OLED SDA | PB7 | AF4 OD | I2C1 400kHz |
 | LED | PC13 | Output PP | 板载 LED |
 
+### 2026-07-15 — 状态驱动冻结式 AGC (突发模式)
+
+修复两个 AGC 致命缺陷:
+
+**缺陷 1 — 待机致聋死锁**: `pga112.c` 中 RMS 过高降增益逻辑无 `frame_active` 保护.
+待机时突发巨响触发降增益, 随后 `frame_active==0` 阻止回调 → 永久卡死在低增益.
+修复: VD_LISTEN 期间不调用 `PGA112_AGC_Update`, 直接死锁在 32x.
+
+**缺陷 2 — 增益突变撕裂 Goertzel 频谱**: 每 5ms 无条件调增益, 数据段中增益跳变
+引入阶跃信号 → 全频段能量泄露 → 次强幅度飙升 → 置信度崩溃 → 符号大面积擦除 0xFF.
+修复: VD_DATA 期间完全冻结增益, 禁止任何 AGC 调节.
+
+**修改文件**: `Core/Src/receiver.c` — `RX_ProcessHalfBuffer` 新增状态驱动 AGC 调度:
+- `VD_LISTEN`: 锁死 32x, 若偏离则强制复位
+- `VD_PREAMBLE`: 激活 AGC (`frame_active=1`), 允许升至 128x
+- `VD_DATA`: 跳过 AGC, 绝对冻结增益 (保护 Goertzel 频谱完整性)
+
+`pga112.c` / `voice_dsp.c` 无需修改: 致聋路径已不可达, 能量归一化逻辑已支持变增益.
+
+### 2026-07-15 — 帧尾 30ms DC 保护槽 (方案一)
+
+**问题**: 最后一个 CRC 符号频频收不到。根因: 最后一个符号 guard 结束后零间隙进入
+2400Hz postamble, postamble 能量通过声学拖尾/房间混响渗入 Goertzel 判决窗,
+且 postamble 频率恰好是 digit 3 (2400Hz), 拉高次强 bin → 置信度崩溃 → 符号擦除.
+
+**修复**: `transmitter.c` ST_DATA 最后符号之后插入 30ms (480 tick) DC 保护槽,
+将 postamble 与最后一个符号的 Goertzel 窗物理隔离.
+
+**时序变化**:
+```
+旧: [最后 tone 20ms] [guard 10ms] → [postamble 2400Hz 120ms]  (零间隙)
+新: [最后 tone 20ms] [guard 10ms] [DC 30ms] → [postamble 2400Hz 120ms]
+```
+
+接收端无需任何改动: 它在收到 `sym_expected` 个符号后已进入 DONE, 额外的 30ms 对
+接收端完全透明. 最坏 48 字符: 总帧长 11.58s + 0.35s ≈ 11.93s, 仍在 20s 预算内.
+
 ### 待验证项
 - 半双工模式切换 (RX→TX→RX) 外设资源冲突检查
 - PA0 一键开关机 Standby 唤醒电流 ≤1mA
 - 端到端收发测试
+- 突发模式 AGC: 远距离弱信号接收距离提升验证
+- 数据段增益冻结后符号擦除率是否显著下降
+- CRC 符号丢失率是否下降 (30ms 保护槽效果)

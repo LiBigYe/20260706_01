@@ -120,17 +120,27 @@ void TX_Tick(void)
         break;
 
     case ST_DATA:
-        if (tx_slot_tick == TICKS_TONE) {
+        if (tx_sym_idx >= tx_sym_count) {
+            /* 最后一个数据符号之后: 插入 30ms (480 tick) DC 保护槽,
+               将 postamble 的 2400Hz 连续音与最后一个符号的 Goertzel
+               判决窗物理隔离, 防止 postamble 能量渗入导致 CRC 符号擦除.
+               每 tick 调 tx_guard() 保持 midscale 输出. */
             tx_guard();
-        } else if (tx_slot_tick >= TICKS_SLOT) {
-            tx_slot_tick = 0;
-            tx_sym_idx++;
-            if (tx_sym_idx >= tx_sym_count) {
+            if (tx_slot_tick >= TICKS_SLOT) {
                 tx_state = ST_POSTAMBLE;
                 tx_tick = 0;
                 tx_set_symbol(VP_PILOT_HI);   /* 2400Hz 结束音 */
-            } else {
-                tx_set_symbol(tx_symbols[tx_sym_idx]);
+            }
+        } else {
+            if (tx_slot_tick == TICKS_TONE) {
+                tx_guard();
+            } else if (tx_slot_tick >= TICKS_SLOT) {
+                tx_slot_tick = 0;
+                tx_sym_idx++;
+                if (tx_sym_idx < tx_sym_count) {
+                    tx_set_symbol(tx_symbols[tx_sym_idx]);
+                }
+                /* sym_idx 已到末尾: 下一 tick 进入上方保护槽分支 */
             }
         }
         break;
