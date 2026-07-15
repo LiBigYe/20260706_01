@@ -13,7 +13,6 @@
   ******************************************************************************
   */
 #include "voice_dsp.h"
-#include "pga112.h"
 #include <math.h>
 #include <string.h>
 
@@ -216,7 +215,7 @@ static void data_store_symbol(VoiceRx *rx)
     }
 }
 
-uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
+uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
 {
     /* 1. 写入原始环形缓冲 */
     for (uint16_t i = 0; i < VD_BLOCK; i++) {
@@ -230,7 +229,6 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
      *    归一化到 32x 增益等效 (增益码 5): energy_norm = energy × 32 / 2^gain_code.
      *    这样 noise_floor 和 thr 都是"等效输入"量,不被 PGA 增益档牵着走. */
     uint32_t energy = VoiceDSP_DiffEnergy(blk, VD_BLOCK);
-    uint8_t  gain_code = g_pga_gain_live;
     uint32_t energy_norm;
     if (gain_code <= 5U)
         energy_norm = energy << (5U - gain_code);          /* 增益小时数值放大归一 */
@@ -344,3 +342,4 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
 
     return (rx->state == VD_DONE) ? 1U : 0U;
 }
+                                             

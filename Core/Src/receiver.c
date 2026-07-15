@@ -18,6 +18,7 @@
 #include "voice_proto.h"
 #include "voice_fec.h"
 #include "voice_dsp.h"
+#include "pga112.h"
 #include <string.h>
 
 /* ========================================================================== */
@@ -146,6 +147,8 @@ void RX_Start(void)
     memset(rx_message, 0, sizeof(rx_message));
     rx_msg_length = 0; rx_source_id = 0; rx_target_mask = 0;
     rx_sync_state();
+    /* 回到 LISTENING: 强制设 64x 增益 */
+    PGA112_SetGain(PGA_GAIN_INIT_CODE);
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 }
@@ -161,15 +164,19 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
     if (rx_state == RX_STATE_IDLE || rx_state == RX_STATE_DONE) return;
 
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
+        const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
+        /* AGC 先调增益 (按当前 vrx 状态判定是否为帧内), 再推进 DSP */
+        PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE,
+                          (vrx.state == VD_PREAMBLE || vrx.state == VD_DATA));
         /* 每子块跟踪 vrx.state 变化, 捕捉中途跨态 (灯只在数据段亮) */
         uint8_t was_data = (vrx.state == VD_DATA);
-        uint8_t done = VoiceRx_PushBlock(&vrx, buf + (uint16_t)i * RX_ENV_BLOCK_SIZE);
+        uint8_t done = VoiceRx_PushBlock(&vrx, sub, PGA112_GetGain());
         rx_last_digit = vrx.last_digit;
         uint8_t now_data = (vrx.state == VD_DATA);
         if (now_data && !was_data)
-            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);  /* 进数据段→亮 */
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
         else if (!now_data && was_data)
-            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);    /* 出数据段→灭 */
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
         if (done) {
             rx_on_frame_done();
             return;
@@ -250,4 +257,3 @@ const char* RX_GetStatusString(void)
     if (rx_state == RX_STATE_DONE) return "Rx Complete";
     return "Stand By";
 }
-

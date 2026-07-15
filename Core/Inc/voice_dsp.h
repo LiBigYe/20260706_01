@@ -86,7 +86,7 @@ uint32_t VoiceDSP_DiffEnergy(const uint16_t *blk, uint16_t n);
 void     VoiceRx_Init(VoiceRx *rx);
 void     VoiceRx_Start(VoiceRx *rx);
 /* 送入一个 80-sample 块, 推进状态机. 返回 1 表示本块后 state==VD_DONE. */
-uint8_t  VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk);
+uint8_t  VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code);
 /* DONE 后取结果: payload+len, crc_ok. */
 
 #ifdef __cplusplus

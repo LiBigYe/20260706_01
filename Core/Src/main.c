@@ -265,8 +265,6 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1 && hm_mode == HM_RX) {
         RX_ProcessHalfBuffer(adc_dma_buf);
-        /* PGA112 AGC: 只在未锁帧时调增益, 锁帧期间冻结 (不扰同步) */
-        PGA112_AGC_Update(adc_dma_buf, RX_BLOCK_SIZE, RX_IsFrameActive());
     }
 }
 
@@ -274,8 +272,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance == ADC1 && hm_mode == HM_RX) {
         RX_ProcessHalfBuffer(adc_dma_buf + RX_BLOCK_SIZE);
-        /* PGA112 AGC: 只在未锁帧时调增益, 锁帧期间冻结 (不扰同步) */
-        PGA112_AGC_Update(adc_dma_buf + RX_BLOCK_SIZE, RX_BLOCK_SIZE, RX_IsFrameActive());
     }
 }
 
