@@ -381,6 +381,7 @@ int main(void)
 
   uint8_t  ls_mode        = LS_LISTENING;
   uint8_t  browse_cursor  = 0;
+  uint8_t  list_offset    = 0;       /* 列表窗口顶部索引 */
   uint8_t  view_scroll    = 0;
   uint8_t  last_key_del   = 0;
   uint8_t  transition_key_lock = 0;
@@ -439,6 +440,7 @@ int main(void)
             if (ls_mode == LS_LISTENING) {
                 ls_mode       = LS_BROWSE_LIST;
                 browse_cursor = 0;
+                list_offset   = 0;
                 last_tick     = 0;
                 transition_key_lock = 1U;
                 continue;
@@ -544,9 +546,17 @@ int main(void)
                     if (key == KEY_RIGHT) {
                         browse_cursor++;
                         if (browse_cursor >= count) browse_cursor = 0;
+                        if (browse_cursor < list_offset)
+                            list_offset = browse_cursor;
+                        else if (browse_cursor >= list_offset + 5)
+                            list_offset = browse_cursor - 4;
                     } else {
                         if (browse_cursor == 0) browse_cursor = count - 1;
                         else browse_cursor--;
+                        if (browse_cursor < list_offset)
+                            list_offset = browse_cursor;
+                        else if (browse_cursor >= list_offset + 5)
+                            list_offset = browse_cursor - 4;
                     }
                     nav_changed = 1;
                 }
@@ -560,6 +570,8 @@ int main(void)
                 count = FlashStore_GetCount();
                 if (count > 0 && browse_cursor >= count)
                     browse_cursor = count - 1;
+                if (list_offset >= count && count > 0)
+                    list_offset = count > 5 ? count - 5 : 0;
                 nav_changed = 1;
             }
 
@@ -579,7 +591,7 @@ int main(void)
                 if (count == 0) {
                     OLED_ShowString(0, 2 * FONT_HEIGHT, "(no messages)");
                 } else {
-                    uint8_t first = (uint8_t)((browse_cursor / 5U) * 5U);
+                    uint8_t first = list_offset;
                     for (uint8_t row = 0; row < 5U && first + row < count; row++) {
                         uint8_t i = (uint8_t)(first + row);
                         const FlashStore_MsgSlot *slot = FlashStore_GetMessage(i);
@@ -613,6 +625,7 @@ int main(void)
             if (!slot || !slot->valid) {
                 ls_mode = LS_BROWSE_LIST;
                 view_scroll = 0;
+                list_offset   = browse_cursor > 4 ? browse_cursor - 4 : 0;
                 last_tick = 0;
                 continue;
             } else {
@@ -628,13 +641,26 @@ int main(void)
                     { vls[vtl] = slot->length; vll[vtl] = 0; vtl++; }
                 if (vtl == 0) { vtl = 1; vls[0] = 0; vll[0] = 0; }
 
+                /* 左右键切换消息 (循环) */
                 if (key == KEY_LEFT || key == KEY_RIGHT) {
-                    if (vtl > VISIBLE_ROWS) {
-                        if (key == KEY_RIGHT) {
-                            if (view_scroll < vtl - VISIBLE_ROWS) view_scroll++;
-                        } else {
-                            if (view_scroll > 0) view_scroll--;
+                    uint8_t tot = FlashStore_GetCount();
+                    uint8_t old_cursor = browse_cursor;
+                    if (key == KEY_RIGHT) {
+                        if (tot > 0U) {
+                            browse_cursor++;
+                            if (browse_cursor >= tot) browse_cursor = 0;
                         }
+                    } else {
+                        if (tot > 0U) {
+                            if (browse_cursor == 0) browse_cursor = tot - 1U;
+                            else browse_cursor--;
+                        }
+                    }
+                    if (browse_cursor != old_cursor) {
+                        view_scroll = 0;
+                        last_tick = 0;
+                        transition_key_lock = 1U;
+                        continue;
                     }
                 }
 

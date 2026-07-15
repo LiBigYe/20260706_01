@@ -160,24 +160,22 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
 {
     if (rx_state == RX_STATE_IDLE || rx_state == RX_STATE_DONE) return;
 
-    uint8_t led_frame_was = (vrx.state == VD_DATA);  /* 灯只在数据段亮, 前导不亮 (避免误进前导时闪) */
-
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
+        /* 每子块跟踪 vrx.state 变化, 捕捉中途跨态 (灯只在数据段亮) */
+        uint8_t was_data = (vrx.state == VD_DATA);
         uint8_t done = VoiceRx_PushBlock(&vrx, buf + (uint16_t)i * RX_ENV_BLOCK_SIZE);
         rx_last_digit = vrx.last_digit;
+        uint8_t now_data = (vrx.state == VD_DATA);
+        if (now_data && !was_data)
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);  /* 进数据段→亮 */
+        else if (!now_data && was_data)
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);    /* 出数据段→灭 */
         if (done) {
             rx_on_frame_done();
             return;
         }
     }
     rx_sync_state();
-
-    /* LED: 进入前导/数据点亮; 退回监听熄灭 */
-    uint8_t led_frame_now = (vrx.state == VD_DATA);  /* 灯只在数据段亮 */
-    if (led_frame_now && !led_frame_was)
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-    else if (!led_frame_now && led_frame_was)
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 }
 
 uint8_t RX_IsBusy(void)

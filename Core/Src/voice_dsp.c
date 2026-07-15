@@ -13,6 +13,7 @@
   ******************************************************************************
   */
 #include "voice_dsp.h"
+#include "pga112.h"
 #include <math.h>
 #include <string.h>
 
@@ -32,19 +33,23 @@ static uint32_t vd_grid_start;     /* 数据符号 0 的 tone 起点 */
 /* 目标频率在 N=160 窗口下的中心 bin */
 static const int vd_center_k[4] = {15, 18, 21, 24};  /* 1500/1800/2100/2400 @160 */
 
-/* 频响补偿权重 (作用于 Goertzel 幅度²):
- * 声学链路 (扬声器+RC低通+麦克风+运放) 对 1500Hz 增益偏低, 使 digit0 的
- * 幅度天生弱于其它三音, 判决时吃亏. 给 1500Hz 的判决量(mag²)加权 1.25,
- * 即"别人 1 倍、它 1.25 倍"再一起比较. 同时影响主/次频选择与置信度.
- * 实测若仍偏弱可继续上调 vd_freq_weight[0]. */
-static const float vd_freq_weight[4] = {1.25f, 1.0f, 1.0f, 1.0f};
+/* 频响补偿权重 (作用于 Goertzel mag²), 基于模拟前端传递函数 H(jω) 计算.
+ *
+ * 前端: OPA1642 两级 Sallen-Key 级联带通 (LPF fc=2751Hz Q=0.74 + HPF fc=1236Hz Q=0.47)
+ * 四个 FSK 频率在通带内各点衰减不同 (1/|H(f)|²):
+ *   1500Hz: -5.1dB → weight=1.33  1800Hz: -4.2dB → weight=1.08
+ *   2100Hz: -3.9dB → weight=1.00  2400Hz: -4.0dB → weight=1.02
+ *
+ * weight 作用于 mag² 比较: compensated_mag² = weight[f] * |H(f)|².
+ * 平衡后四个频率对相同输入幅度的响应一致, 消除"1500Hz 天生吃亏"的判决偏置. */
+static const float vd_freq_weight[4] = {1.33f, 1.08f, 1.00f, 1.02f};
 
 /* ---- 唤醒能量门限 (自适应, 仅用于"唤醒提示", 真正判决靠频谱置信度) ----
  * 复核缺陷 1/3 对策: 能量门限只做低成本唤醒, 取 noise×1.5, 让弱信号也能
  * 进入 PREAMBLE; 误唤醒由后续导频交替 + 同步音置信度 (裕量数百倍) 自然拒绝. */
 #define VD_EN_FLOOR_INIT   400U
-#define VD_EN_MARGIN       500U
-#define VD_EN_MIN          800U     /* 差分能量最小唤醒门限 (按用户要求回退 2000→800) */
+#define VD_EN_MARGIN      1000U  /* noise_floor在700~1300,需足够余量防噪声尖峰突破 */
+#define VD_EN_MIN          800U     /* 差分能量最小唤醒门限 */
 #define VD_STARTUP_QUIET    15U     /* ~75ms 静稳 (缩短以降低首帧竞态窗口) */
 
 /* ---- 前导/同步参数 (样本) ---- */
@@ -221,12 +226,20 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     uint32_t block_start_abs = vd_total;   /* 本块首样本的绝对坐标 */
     vd_total += VD_BLOCK;
 
-    /* 2. 能量 (差分, 高通) + 自适应唤醒门限 */
+    /* 2. 能量 (差分, 高通) + 自适应唤醒门限
+     *    归一化到 32x 增益等效 (增益码 5): energy_norm = energy × 32 / 2^gain_code.
+     *    这样 noise_floor 和 thr 都是"等效输入"量,不被 PGA 增益档牵着走. */
     uint32_t energy = VoiceDSP_DiffEnergy(blk, VD_BLOCK);
-    rx->last_energy = energy;
+    uint8_t  gain_code = g_pga_gain_live;
+    uint32_t energy_norm;
+    if (gain_code <= 5U)
+        energy_norm = energy << (5U - gain_code);          /* 增益小时数值放大归一 */
+    else
+        energy_norm = energy >> (gain_code - 5U);          /* 增益大时数值缩小归一 */
+    rx->last_energy = energy_norm;
     uint32_t thr = rx->noise_floor + rx->noise_floor / 2U + VD_EN_MARGIN;  /* noise×1.5 */
     if (thr < VD_EN_MIN) thr = VD_EN_MIN;
-    uint8_t hi = (energy >= thr) ? 1U : 0U;
+    uint8_t hi = (energy_norm >= thr) ? 1U : 0U;
 
     if (rx->state == VD_LISTEN && rx->startup_quiet < VD_STARTUP_QUIET) {
         /* 上电快速底噪标定: 用原始能量统计学习, 不依赖 HI/LO 判决.
@@ -234,17 +247,17 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
          * 就判定"疑似信号到达" → 立即结束标定并让本块正常参与 HI 判决,
          * 避免首帧紧跟 RX_Start 时前导被标定窗吞掉的竞态. 用 thr 而非
          * 额外 delta, 保证与后续正常判决同一标准, 不会漏检也不会误锁. */
-        if (energy >= thr && rx->startup_quiet > 0U) {
+        if (energy_norm >= thr && rx->startup_quiet > 0U) {
             rx->startup_quiet = VD_STARTUP_QUIET;   /* 结束标定 */
-            /* hi 已按 (energy>=thr) 置位, 本块正常进入状态机 */
+            /* hi 已按 (energy_norm>=thr) 置位, 本块正常进入状态机 */
         } else {
             rx->noise_floor = (rx->startup_quiet == 0U)
-                ? energy : (rx->noise_floor * 7U + energy) / 8U;
+                ? energy_norm : (rx->noise_floor * 7U + energy_norm) / 8U;
             if (rx->startup_quiet < VD_STARTUP_QUIET) rx->startup_quiet++;
             hi = 0U; rx->hi_run = 0U;
         }
     } else if (rx->state == VD_LISTEN && !hi) {
-        rx->noise_floor = (rx->noise_floor * 15U + energy) / 16U;  /* 慢速 IIR */
+        rx->noise_floor = (rx->noise_floor * 15U + energy_norm) / 16U;  /* 慢速 IIR */
     }
 
     if (hi) { rx->hi_run++; rx->lo_run = 0; }
@@ -300,18 +313,16 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     }
 
     case VD_DATA: {
-        /* long silence (>500ms) -> abandon */
         if (rx->lo_run >= 100U) { rx->state = VD_LISTEN; rx->hi_run = 0; break; }
 
-        /* collect decision window on the free-running grid, sample by sample */
         for (uint16_t i = 0; i < VD_BLOCK; i++) {
             uint32_t abspos = block_start_abs + i;
             if (abspos < vd_grid_start) continue;
             uint32_t rel = abspos - vd_grid_start;
             uint32_t sym = rel / VP_SLOT_SAMPLES;
             uint32_t pos = rel % VP_SLOT_SAMPLES;
-            if (sym != rx->sym_count) continue;         /* only current symbol */
-            if (pos < VD_WIN_OFFSET) continue;          /* skip 5ms onset */
+            if (sym != rx->sym_count) continue;
+            if (pos < VD_WIN_OFFSET) continue;
             uint32_t w = pos - VD_WIN_OFFSET;
             if (w < VD_WIN) {
                 rx->win_buf[w] = blk[i];
@@ -319,7 +330,7 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
                 if (rx->win_fill == VD_WIN) {
                     data_store_symbol(rx);
                     rx->win_fill = 0;
-                    if (rx->state != VD_DATA) break;    /* DONE/LISTEN */
+                    if (rx->state != VD_DATA) break;
                 }
             }
         }
