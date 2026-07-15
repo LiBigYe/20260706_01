@@ -393,3 +393,25 @@ voice_proto.h/voice_fec.c/.h/voice_dsp.c/.h; 06 的 main.c/main.h/hal_msp.c/pwm_
   拉高间须为 16 时钟整数倍 (我们发 2 字节=16bit, 满足); 最大 SCLK 10MHz (我们 ~1.5MHz).
   → 与 CubeMX 现有 SPI2 配置 (Mode0/MSB/8bit) 完全一致, 无需改 CubeMX.
 - pga112.h 顶部宏已按手册标注来源 (Table 3/5/6). AGC 单元测试全过, 两工程编译 0 error.
+
+## 2026-07-14 (补4) — 进门严格化 + 灯只在数据段亮 (消除噪声误唤醒/乱闪)
+
+问题: 待机(尤其 ADC 悬空或强背景噪声)时接收指示灯一直闪. 根因: LISTEN→PREAMBLE
+的进门闸只看"连续 6 块高能量", 不验证频率结构; 噪声能量偶尔连续超门限即误进
+PREAMBLE(灯亮), 拿不到导频交替/同步音后超时退回 LISTEN(灯灭), 如此往复.
+
+**改动1 (voice_dsp.c, LISTEN 进门加导频验证)**: 连续 6 块高能量后, 追加要求最近
+160 样本经 Goertzel 分类必须为 1500Hz 或 2400Hz 导频音, 才进 PREAMBLE. 纯噪声频谱
+平坦→置信度不足→判 0xFF 擦除→进不来. 窄带单音(工频谐波/PWM 泄漏/非导频频率)也
+因不是 1500/2400 被挡. 进门同时记下首个导频到 pilot_last, 供后续交替计数.
+
+**改动2 (receiver.c, 灯只在 DATA 亮)**: 点灯条件从"PREAMBLE 或 DATA"改为"仅 DATA".
+即使偶发误进前导, 只要没锁上同步进入数据段, 灯就不亮 → 视觉上不再闪. 接收成功
+(DONE) 点亮逻辑保留.
+
+**DATA 段未改** (用户要求保持现状): 中途放弃逻辑(连续 500ms 静音、LEN 非法)不变.
+
+**PC 验证**: (1) 真实帧仍正常 PREAMBLE→DATA→CRC 通过, 解码正确; (2) 全链路 FULLSTACK
+ALL PASS; (3) 声学信道仿真 ALL PASS; (4) 进门闸测试: 白噪声/1000/1650/3000Hz单音/
+50Hz工频 误进 PREAMBLE 均 0 次. 02 与 06 的 voice_dsp.c/receiver.c 逐字节一致.
+无 arm-none-eabi 未生成 ELF, 待真机验证悬空/背景噪声下灯不再乱闪.

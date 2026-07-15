@@ -253,11 +253,21 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     switch (rx->state) {
 
     case VD_LISTEN:
-        if (rx->hi_run >= VD_PREAMBLE_MIN_HI) {
-            rx->state = VD_PREAMBLE;
-            rx->block_in_pre = 0;
-            rx->pilot_last = 0xFFU;
-            rx->pilot_trans = 0;
+        /* 进门严格化: 仅连续高能量不足以进前导 (纯噪声也会偶尔连续超门限).
+         * 追加导频验证: 最近 160 样本必须判为 1500Hz 或 2400Hz 导频音,
+         * 才认定是真实帧前导. 纯噪声频谱平坦→分类为 0xFF 擦除→进不来,
+         * 从根上消除噪声误唤醒 (灯乱闪). */
+        if (rx->hi_run >= VD_PREAMBLE_MIN_HI && vd_total >= VD_WIN) {
+            uint16_t lwin[VD_WIN];
+            ring_extract(vd_total - VD_WIN, VD_WIN, lwin);
+            float lconf;
+            uint8_t ld = VoiceDSP_Classify(lwin, VD_WIN, &lconf);
+            if (ld == VP_PILOT_LO || ld == VP_PILOT_HI) {
+                rx->state = VD_PREAMBLE;
+                rx->block_in_pre = 0;
+                rx->pilot_last = ld;        /* 记下首个导频, 供交替计数 */
+                rx->pilot_trans = 0;
+            }
         }
         break;
 
