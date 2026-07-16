@@ -3,7 +3,7 @@
   * @file           : keyboard.c
   * @brief          : 4x4 Matrix Keyboard Driver — 声语信使项目 (半双工)
   *
-  *   Hardware layout (PA0=ROW0顶, PA3=ROW3底, PA4=COL0左, PA7=COL3右):
+  *   Hardware layout (PA0=ROW0顶, PA3=ROW3底, PA9=COL0左, PA12=COL3右):
   *                Col0    Col1    Col2    Col3
   *              (PA9)   (PA10)  (PA11)  (PA12)
   *   Row0 (PA0,顶): 1       2       3     开/关
@@ -202,3 +202,4 @@ const char* Keyboard_GetKeyName(uint8_t key)
     }
     return "?";
 }
+

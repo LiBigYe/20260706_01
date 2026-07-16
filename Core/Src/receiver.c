@@ -167,7 +167,7 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
         const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
 
         /* ========================================================= */
-        /* 状态驱动的冻结式 AGC 调度策略                               */
+        /* 状态驱动的冻结式 AGC 调度策略 (v5.1 Early-Freeze)          */
         /* ========================================================= */
         if (vrx.state == VD_LISTEN) {
             /* 待机态: 死锁在 32x, 防止突发巨响降增益后无法恢复 (致聋) */
@@ -175,14 +175,19 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
                 PGA112_SetGain(PGA_GAIN_INIT_CODE);
                 PGA112_AGC_Reset();
             }
-        } else if (vrx.state == VD_PREAMBLE) {
-            /* 前导态: 激活 AGC, 允许飙升至 128x, 迅速咬住远距离信号 */
+        } else if (vrx.state == VD_PREAMBLE && vrx.pilot_trans < 2U) {
+            /* 前导前期 (pilot_trans < 2 = 前 ~80ms): AGC 活跃, 允许飙升至 128x.
+             * pilot_trans >= 2 后提前冻结: 此时 AGC 已收敛 80ms (16 轮 Update),
+             * 提前锁定增益, 为即将到来的 1800Hz SYNC 同步音精定时锚点
+             * 确保绝对干净的物理波形 — 零增益跳变瞬态噪声 — 防止 SYNC
+             * 检测窗的 True SNR 被阶跃能量污染 → 锚点丢失 → 整帧报废. */
             PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, 1U);
         }
-        /* 数据态 (VD_DATA) 及其他: 跳过 AGC, 绝对冻结增益.
-           严禁在符号解调期间改变波形振幅 — 阶跃信号的全频段能量泄露
-           会瞬间拉高 Goertzel 次强幅度, 摧毁置信度判决, 导致符号
-           大面积擦除为 0xFF. */
+        /* 前导后期 (pilot_trans >= 2) 及数据态 (VD_DATA):
+           绝对冻结增益, 禁止任何 PGA 寄存器写入.
+           FSK 是频率调制 → 偶发的 ADC 削顶 (方波化) 不会破坏过零点
+           频率信息, Goertzel 基波提取不受影响 (限幅器效应).
+           但增益跳变引入的 AM 包络调制会立刻引发频谱泄露. */
         /* ========================================================= */
 
         /* 将子块推入 DSP, 传入当前真实的物理增益码供能量归一化使用 */

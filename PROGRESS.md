@@ -1,7 +1,7 @@
 # 声语信使 — 半双工项目进度文档
 
-> 最后更新: 2026-07-07
-> 阶段: v4 DPLL下降沿同步 + 信息存储 (提高部分③)
+> 最后更新: 2026-07-16
+> 阶段: v5.1 True SNR 分类器 + 频域抗噪重构
 
 ---
 
@@ -19,9 +19,10 @@
 ```
 HM_RX (默认接收)
   ├─ LS_LISTENING: 监听/显示上次消息 (默认子模式)
-  ├─ LS_BROWSE_LIST: 已存储消息列表 (5条循环缓冲)
+  ├─ LS_BROWSE_LIST: 已存储消息列表 (64条循环缓冲)
   └─ LS_BROWSE_VIEW: 查看单条存储消息
 HM_TX_EDIT (编辑短信息)
+HM_TX_SELECT (收件人多选)
 HM_TX_BUSY (发送中)
 ```
 
@@ -29,389 +30,245 @@ HM_TX_BUSY (发送中)
 
 | 从 | 到 | 触发 |
 |---|----|------|
-| HM_RX | HM_TX_EDIT | KEY_SEND 或 T9数字键 |
-| HM_TX_EDIT | HM_TX_BUSY | KEY_SEND (消息非空) |
-| HM_TX_BUSY | HM_RX | TX done 自动返回 |
-| HM_RX 子模式切换 | LS_LISTENING↔BROWSE_LIST↔BROWSE_VIEW | KEY_MODE |
-| 任意 | Standby | KEY_POWER |
+| HM_RX | HM_TX_EDIT | KEY_FN 或 T9数字键 |
+| HM_RX | LS_BROWSE_LIST | KEY_SEND |
+| HM_TX_EDIT | HM_TX_SELECT | KEY_SEND (消息非空) |
+| HM_TX_SELECT | HM_TX_BUSY | KEY_SEND (确认发送) |
+| HM_TX_EDIT | HM_RX | KEY_FN 或 KEY_RIGHT(光标在末尾) |
+| HM_TX_BUSY | HM_TX_EDIT | TX done 自动返回 (保留编辑器内容) |
+| RX 子模式切换 | LS_LISTENING↔BROWSE_LIST↔BROWSE_VIEW | KEY_FN / KEY_SEND / 数字键 |
+| 任意 | 关机 | POWER_BUTTON (PB1 下降沿) |
 
 ---
 
-## 三、信息存储 (提高部分③)
+## 三、硬件配置
 
-### 硬件
+| 模块 | 配置 |
+|------|------|
+| MCU | STM32F411CEU6 |
+| 时钟 | **HSE 25MHz** 外部晶振 → PLL 50MHz SYSCLK, CSS 使能 |
+| 音频输出 | PA8, TIM1_CH1 PWM DDS, 48.83kHz 载波 → RC 低通 |
+| 音频输入 | PB0, ADC1_IN8, TIM2 TRGO_UPDATE 触发 @ 16kHz (PSC=4, ARR=624) |
+| DMA | DMA2_Stream0, 循环 800 halfwords |
+| DDS 时钟 | TIM3 ISR @ 16kHz (PSC=4, ARR=624) |
+| 键盘 | 4x4 矩阵, PA0~PA3 rows, **PA9~PA12** cols |
+| OLED | I2C1 (PB6/PB7), SSD1306 128x64 |
+| 第二级放大 | PGA112, SPI2 (PB12=CS, PB13=SCK, PB15=MOSI), **32x** 初始增益 |
+| 外部存储 | PY25Q64 8MB SPI NOR Flash, SPI1 (PA4=CS, PA5=SCK, PA6=MISO, PA7=MOSI) |
+| 电源管理 | PB1=POWER_BUTTON (EXTI1), PB8=POWER_CTRL (硬件锁存) |
+| LED | PC13=收发状态指示, PB2=LEDG(绿/灭), PB10=LEDR(红/灭) |
 
-STM32F411CEU6 内部 Flash Sector 3 (0x0800C000, 16KB)
+### 引脚分配
 
-### 存储格式
-
-67 words = 268 bytes, 全量擦写策略
-
-### 循环缓冲
-
-5条FIFO, 满时自动淘汰最旧消息
-
-### 自动保存
-
-接收完成后(rx_enter_done)自动写入Flash, 断电不丢失
+| 功能 | 引脚 | 模式 |
+|------|------|------|
+| KB_ROW0~3 | PA0~PA3 | Output PP |
+| **KB_COL0~3** | **PA9~PA12** | Input PU |
+| PWM 音频输出 | PA8 | AF1 PP |
+| ADC 音频输入 | PB0 | Analog |
+| OLED SCL/SDA | PB6/PB7 | AF4 OD |
+| LED | PC13 | Output PP |
+| LEDG | PB2 | Output PP |
+| LEDR | PB10 | Output PP |
+| POWER_BUTTON | PB1 | Input PU + EXTI1 |
+| POWER_CTRL | PB8 | Output PP |
+| F_CS (Flash) | PA4 | Output PP |
+| PG112_CS | PB12 | Output PP |
 
 ---
 
-## 四、v4 DPLL 下降沿 (与单工相同)
+## 四、协议 (v5.1)
 
-收发共享协议帧: Preamble(200ms) + Data(192 symbols) + Checksum(4) + Postamble(200ms)
+### 帧结构
+
+```
+[Preamble 200ms] [SYNC 1800Hz 30ms] [LEN×3冗余] [Payload+CRC8: Hamming(7,4)+交织]
+[DC保护槽 30ms] [Postamble 2400Hz 120ms]
+```
+
+- **变长帧**: payload = [source_id(1B)][mask_lo(1B)][mask_hi(1B)][text...]
+- **FEC**: Hamming(7,4) + 块交织, 每字节→7符号
+- **CRC-8**: poly 0x07, 覆盖 LEN + payload
+- **LEN**: 三重冗余, 逐bit多数表决
+- **符号时序**: 20ms tone + 10ms guard = 30ms 槽
+- **4-FSK**: 1500/1800/2100/2400 Hz
+
+### 源文件 (12个活跃)
+
+| 文件 | 功能 |
+|------|------|
+| main.c | 顶层状态机 + UI |
+| transmitter.c | v5 发送 (变长帧 + FEC) |
+| receiver.c | v5 接收 (状态驱动 AGC) |
+| voice_dsp.c | v5.1 DSP (True SNR) |
+| voice_fec.c | Hamming(7,4) + CRC-8 |
+| pwm_dds.c | PWM DDS 正弦生成 |
+| fsk4_encoder.c | DDS 相位增量计算 |
+| flash_store.c + py25q64.c | SPI Flash 存储 |
+| pga112.c | PGA112 AGC |
+| oled.c | SSD1306 OLED |
+| keyboard.c | 4x4 键盘扫描 |
+| editor.c | T9 文本编辑 |
 
 ---
 
-## 五、待完成
+## 五、信息存储 — PY25Q64 SPI NOR Flash
 
-- [ ] 硬件联调: 半双工模式切换 (RX↔TX) 无外设资源冲突
-- [ ] 端到端收发测试 (两板对调)
-- [ ] Flash 写入时 CPU stall 对正在进行的 DMA 的影响 (仅在 RX_STATE_DONE 时写入, 无 DMA)
-- [ ] 新增 flash_store.c 需加入 CMakeLists.txt 编译
+- 外部 PY25Q64 8MB SPI Flash (SPI1)
+- A/B 双副本 (0x000000 / 0x001000), CRC32 完整性校验 + generation 仲裁
+- 64 条消息 FIFO 循环缓冲
+- 写入前暂停 ADC DMA
 
 ---
 
 ## 六、变更记录
 
-### 2026-07-08 (CubeMX 重生成后修复)
+### 2026-07-16 — v5.1 True SNR 分类器 + 频域抗噪重构
 
-**GPIO 重分配**: 键盘矩阵改为全部 GPIOA (PA0~PA7, 与单工一致):
-- keyboard.c 移除 `col_ports[4]`，恢复单 `COL_PORT` 宏
-- keyboard.h 注释更新为 PA0~PA3 rows, PA4~PA7 cols
-- 修复 LED 初始态 `GPIO_PIN_RESET` → `GPIO_PIN_SET`
-- 添加 `HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1)` (PA0 兼作 WKUP)
-- 清理 receiver.c `rx_enter_error` 死代码注释
+针对接收端两大隐蔽缺陷进行 DSP 层 + 状态机层重构:
 
-### 2026-07-07
+**缺陷 1 — 差分能量对频率偏置导致弱信号漏检**: `VoiceDSP_DiffEnergy` 对 1500Hz
+载波只有 2400Hz 的 62.5% (dE ∝ A×f), 相同声学幅度下低频符号的时域能量天然更低,
+被 `VD_EN_MARGIN=1000` 挡在门外.
 
-**从单工合并修复**:
-- 新增 flash_store.c/h (内部Flash非易失存储, 5条循环缓冲)
-- 修复 LED 初始状态 GPIO_PIN_RESET→GPIO_PIN_SET (上电熄灭)
-- 修复 RX Done 处理顺序 (先显示"Rx Complete"2s → 再清除重启)
-- 新增 RX 子模式 (LS_LISTENING/BROWSE_LIST/BROWSE_VIEW, KEY_MODE切换)
-- 新增 FlashStore_Init 初始化调用
-- 新增 receiver.c 自动保存 (rx_enter_done → FlashStore_SaveMessage)
+**缺陷 2 — 时域能量误导信号丢失判定**: VD_PREAMBLE 的 `lo_run >= 20U` 和 VD_DATA
+的 `lo_run >= 100U` 在数据段 1500Hz 符号出现时误累加, 导致接收中途 LED 熄灭 →
+帧被掐断.
 
-### 2026-07-10 — 增加硬件锁存软开关
+**修改 1 — True SNR 分类器** (`voice_dsp.c` VoiceDSP_Classify):
+旧判据 `best/second ≥ 1.6` 在宽带噪声下四个 bin 同时抬高 → 比值偶然越过门限 →
+噪声误判为有效符号. 新判据 True SNR = P_signal / (P_total - P_signal):
+- P_total = Σ(x[i]-x̄)² (时域方差, 全频段能量)
+- P_signal = max Goertzel mag² × 2/N (最强载波, 换算到方差单位)
+- α = 2/N = 0.0125 (N=160, 整数 bin 精确对齐)
+- 门限: raw_mag² ≥ 200,000 且 SNR ≥ 2.0 (6dB)
 
-- 复用发送端软开关方案：`PB1=POWER_BUTTON/EXTI1`，`PB8=POWER_CTRL`。
-- 增加 HAL 初始化前的寄存器级早期锁存和 BOR 防重启等待逻辑。
-- 增加开机按键松手检测与 50ms 防抖。
-- EXTI 回调立即解除电源锁存；主循环停止 ADC DMA、TIM2、TIM3、RX 和 PWM DDS，关闭指示灯及 OLED 后等待硬件掉电。
-- `cmake --preset Debug` 与 `cmake --build --preset Debug --parallel` 构建通过；FLASH 49120B，RAM 7096B。
-- 待实机验证：RX/TX/浏览三种状态下均可可靠关机，且关机电流不大于 1mA。
+**修改 2 — 低能量门限 + 双重频域锁** (`voice_dsp.c`):
+VD_EN_MARGIN 1000→500, VD_EN_MIN 800→500 (弱信号放进门), 但进场后须连续
+2 次 Goertzel 命中同一导频 (1500/2400Hz) 才放行. 噪声频谱平坦 → 不可能连续命中.
 
-### 2026-07-10 — 多终端通信
+**修改 3 — 频域擦除计数替代 lo_run** (`voice_dsp.c`):
+移除 VD_PREAMBLE 的 `lo_run>=20U` 退出 (仅留 700ms 硬超时) 和 VD_DATA 的
+`lo_run>=100U` 退网. 改为 `data_store_symbol` 中连续 4 符号 Goertzel 返回 0xFF
+才判信号丢失. 瞬时擦除交给 Hamming(7,4) 纠错.
 
-- 本终端编号设为 `DEVICE_ID=3`，复制终端工程时只需修改该宏。
-- 支持ID 1~9、任意多选目标及广播；发送编辑与收件人选择使用独立状态，避免数字键输入冲突。
-- 收件人页：1~9切换目标，0广播，发送确认，删除/英数取消；不会因取消最后一个目标而意外广播。
-- 接收端仅处理广播或包含本机ID的消息，并在实时与历史显示中标注发送端ID。
-- Flash v2保存来源ID并兼容v1旧消息；完整帧固定约6.64秒。
-- Debug构建通过。
+**修改 4 — LiveWatch 诊断接口** (`receiver.c/h`):
+新增 RX_GetPilotHits/GetEraseRun/GetLastSNR/GetVGain/GetDspSubState 五个 getter.
 
-### 2026-07-10 — 开机设置设备编号
+**修改文件**: voice_dsp.h (+pilot_hits/erase_run, +宏), voice_dsp.c (True SNR +
+双重锁 + 擦除计数), receiver.c/h (诊断接口).
 
-- 半双工终端移除固定编号，每次开机按1~9选择，发送键确认，删除键清除。
-- 未确认前不进入RX/TX状态；确认后才初始化收发状态机并进入监听。
-- 发送源ID、接收地址过滤和收件人选择页统一使用运行时编号。
+### 2026-07-15 — 状态驱动冻结式 AGC (突发模式)
 
+修复两个 AGC 致命缺陷:
 
-### 2026-07-11 — 提高②③⑥⑦：半双工、可靠接收与低功耗
+**缺陷 1 — 待机致聋死锁**: `pga112.c` 中 RMS 过高降增益逻辑无 `frame_active` 保护.
+待机时突发巨响触发降增益, 随后 `frame_active==0` 阻止回调 → 永久卡死在低增益.
+修复: VD_LISTEN 期间不调用 `PGA112_AGC_Update`, 直接死锁在 32x.
 
-- **半双工资源互斥**：RX 进入编辑或发送前统一停止 ADC DMA、TIM2 与接收状态机；接收前导/数据期间拒绝切入编辑，避免按键截断有效帧。
-- **可靠性（提高⑥ 1/2/3）**：接收端增加背景噪声 IIR 基线和自适应包络门限（绝对下限、倍率与上限）；Goertzel 改用每窗口动态直流均值，保留绝对强度与峰值比双门限；前导码必须观测到 1500Hz/2400Hz 的至少一次交替后才进入数据接收。
-- **安全存储（提高③）**：Flash 擦写从 ADC DMA 回调链移至主循环；擦写时暂停采样，避免 Flash 取指 stall 影响接收；重写顺序改为“槽位 → 版本/数量 → 最后 Magic 提交标记”，防止掉电后将半写入数据视作有效记录。
-- **低功耗（提高⑦ 1/3/5）**：监听空闲 20 秒自动关闭 OLED（任意按键、帧活动或接收完成唤醒）；纯监听无按键时使用 `__WFI()`；编辑、发送和 Flash 删除均按状态启停 RX 外设。
-- **中断优先级**：`EXTI1`（软开关）= 0，`DMA2_Stream0`（ADC）= 1，`TIM3`（DDS）= 2；同步更新 `.ioc`，保证关机中断可抢占采样与发射中断。
-- **验证**：`cmake --build --preset Debug --parallel` 通过；FLASH 52096B，RAM 7176B。仍须实机标定能量门限、导频识别和远距离误码率。
+**缺陷 2 — 增益突变撕裂 Goertzel 频谱**: 每 5ms 无条件调增益, 数据段中增益跳变
+引入阶跃信号 → 全频段能量泄露 → 次强幅度飙升 → 置信度崩溃 → 符号大面积擦除 0xFF.
+修复: VD_DATA 期间完全冻结增益, 禁止任何 AGC 调节.
 
+**修改文件**: `Core/Src/receiver.c` — `RX_ProcessHalfBuffer` 新增状态驱动 AGC 调度:
+- `VD_LISTEN`: 锁死 32x, 若偏离则强制复位
+- `VD_PREAMBLE` 前期 (pilot_trans < 2): 激活 AGC, 允许升至 128x
+- `VD_PREAMBLE` 后期 + `VD_DATA`: 跳过 AGC, 绝对冻结增益
 
-### 2026-07-11 — 同步修复接收启动幽灵信号
+### 2026-07-15 — 帧尾 30ms DC 保护槽 (方案一)
 
-- 自适应包络绝对下限恢复至25000。
-- 每次启动RX后增加约200ms连续静稳期；启动瞬态超过60000时重新计时，静稳期内不允许进入前导状态。
-- 静稳样本快速初始化噪声基线，之后才转为慢速IIR跟踪。
-- Debug构建通过：FLASH 52216B，RAM 7176B。
+**问题**: 最后一个 CRC 符号频频收不到. 根因: 最后一个符号 guard 结束后零间隙进入
+2400Hz postamble, postamble 能量通过声学拖尾/房间混响渗入 Goertzel 判决窗,
+且 postamble 频率恰好是 digit 3 (2400Hz), 拉高次强 bin → 置信度崩溃 → 符号擦除.
 
+**修复**: `transmitter.c` ST_DATA 最后符号之后插入 30ms (480 tick) DC 保护槽,
+将 postamble 与最后一个符号的 Goertzel 窗物理隔离.
 
-### 2026-07-11 — 修复半双工接收后设备编号失效
+**时序变化**:
+```
+旧: [最后 tone 20ms] [guard 10ms] → [postamble 2400Hz 120ms]  (零间隙)
+新: [最后 tone 20ms] [guard 10ms] [DC 30ms] → [postamble 2400Hz 120ms]
+```
 
-- 核对确认半双工的 `fsk4_encoder`、`transmitter` 与已验证单工发送端逐文件一致，源ID/目标掩码均按3字节网络头编码。
-- 定位到接收完成后的事务恢复缺陷：安全Flash保存会停止ADC DMA与TIM2，但2秒显示结束后只调用`RX_ClearDone()`，没有重新启动采样。
-- 结果是首次接收完成后半双工端永久失去后续帧，自然无法继续解析发送设备ID和目标设备ID。
-- 修复为完成显示并清除DONE后调用`HM_StartRxSampling()`，统一恢复ADC DMA、TIM2和RX状态机。
-- Debug构建通过：FLASH约51KB，RAM 7176B。
+接收端无需任何改动: 它在收到 `sym_expected` 个符号后已进入 DONE, 额外的 30ms 对
+接收端完全透明. 最坏 48 字符: 总帧长 ~11.93s, 仍在 20s 预算内.
 
+### 2026-07-14 — v5 收发协同重构 (针对 DSP 复核 5 缺陷)
 
-### 2026-07-11 — 修复半双工接收底栏F/C数字缺失
+半双工同时含发送与接收, 两端均迁移到 v5 (与单工 01/02 逐字节共享 transmitter.c /
+receiver.c / voice_fec.c / voice_dsp.c):
+- **发送**: 变长帧 `[前导][1800Hz同步音][LEN三重冗余][payload+CRC8]`, Hamming(7,4)+交织.
+- **接收**: 前导+同步音一次锁定 30ms 栅格 (免疫混响), 频谱置信度判决 (无绝对幅值门限,
+  提升距离), 差分能量高通检测 (免疫 50Hz/DC), ±1 bin 频偏容忍, FEC 抗突发.
+- **公开 API / 顶层半双工状态机 (HM_RX/HM_TX_EDIT/HM_TX_BUSY) / 外设互斥启停 / 双 LED /
+  Flash / 中文启动页 / 软开关全部不变**: main.c 无需改动.
+- **CMake**: 新增 `voice_fec.c`/`voice_dsp.c`. 引脚/定时器 (TIM1/2/3) 无变化.
+- PC 端 (gcc) 编译 + 链接 + FEC 单测 + 信道仿真 + 收发全链路均通过; **待真机烧录 (两板对调) 声学实测**.
 
-- 将接收完成页和常态监听页的底栏从`snprintf`整串绘制改为固定坐标逐字符绘制。
-- 来源ID有效时显示`F:1`~`F:9`，无有效来源时显示`F:-`；字符数按十进制显示，状态文字仍右对齐。
-- 避免格式化结果或右侧状态文字造成F/C数值不可见。
-- Debug构建通过：FLASH 52356B，RAM 7176B。
+### 2026-07-14 (补3) — PGA112 数据手册核对 + 命令修正
 
-
-### 2026-07-11 — 全面检查并修复半双工底栏数字渲染
-
-- 现象：发送编辑底栏中的“已输入/剩余字符”数字均不显示，只有格式串中的固定`/`可见；与此前接收底栏F/C数字缺失属于同类表现。
-- 检查确认OLED数字字模0~9完整，Framebuffer和坐标正常；问题集中于底栏通过`snprintf(%d/%u)`生成数字字符串的路径。
-- 编辑器底栏改为直接十进制逐字符绘制：当前长度、`/`、剩余长度、输入模式均使用固定坐标输出，不再依赖printf数字转换。
-- 增加状态文字防重叠判断，右侧`Tx Ready/Tx Active/Tx Complete`仅在与左侧计数栏不冲突时绘制。
-- 半双工其他底栏检查结果：接收底栏F/C已采用直接数字绘制；浏览列表和详情底栏均为固定提示文本，无数字格式化依赖。
-- Debug构建通过：FLASH 52620B，RAM 7176B。
-
-
-### 2026-07-11 — 统一半双工与单工的OLED渲染链路
-
-- 针对“不同时间、不同位置偶发缺失/残留”的现象，检查确认半双工独有的OLED自动熄屏会在Framebuffer已更新后跳过`OLED_Refresh()`，形成与单工不同的渲染分支。
-- 移除半双工自动熄屏/唤醒接口和所有相关主循环判断；保留`__WFI()`等待，但所有界面均恢复单工的“清屏 → 绘制 → 刷新”路径。
-- `Core/Src/oled.c`已与单工发送端逐字节同步。
-- `Core/Src/editor.c`已直接同步为单工发送端的稳定编辑渲染实现；仅将`KEY_MODE`适配为半双工`KEY_FN`，并保留半双工模式切换需要的`Editor_IsCursorAtEnd()`。
-- 半双工接收/历史页面继续使用统一OLED驱动和每帧完整刷新，不存在关闭显示时跳过刷新。
-- Debug构建通过：FLASH 52088B，RAM约7KB。需要重新烧录后验证编辑、接收、历史浏览与RX/TX切换四种页面的连续刷新。
-
-
-### 2026-07-11 — 恢复OLED熄屏/唤醒并修正唤醒刷新
-
-- 按低静态功耗要求恢复监听空闲20秒后的OLED熄屏（`0xAE`）；Sleep/WFI保持启用。
-- 任意按键、前导/数据接收或接收完成均唤醒OLED（`0xAF`）。
-- 修正唤醒策略：`OLED_SetDisplay(1)`在开屏命令后立即完整发送当前Framebuffer，避免“已亮屏但未重新绘制”的显示残留；熄屏期间`OLED_Refresh()`仍跳过I2C传输以降低功耗。
-- 编辑器与OLED基础渲染仍保持与单工发送端一致，熄屏仅是半双工低功耗外层控制，不再影响局部字符渲染。
-- Debug构建通过：FLASH 52332B，RAM 7176B。
-
-
-### 2026-07-11 — 修复半双工历史消息无法查看
-
-- 根因不是Flash存储：RX子状态机中`LS_BROWSE_LIST`错误地作为监听页“是否刷新”的`else`分支，导致历史列表仅在监听页不刷新时偶发执行；刷新时反而继续绘制监听界面。
-- 修复为明确的三层互斥状态：`LS_LISTENING`、`LS_BROWSE_LIST`、`LS_BROWSE_VIEW`，各自独立处理渲染和按键。
-- 修复按键冲突：数字键仅在监听状态进入发送编辑，不再抢占历史列表操作；历史列表使用与提示一致的`发送`键打开当前消息。
-- 进入列表/从详情返回列表时强制下一轮刷新；删除消息后标记列表重绘。
-- 浏览操作：监听页发送→列表，左右→选项，发送→详情，详情发送/删除→列表，英/数→监听；列表删除→删除当前条目。
-- Debug构建通过：FLASH 52364B，RAM 7176B。
-
-
-### 2026-07-11 — 修复半双工历史页面底栏提示显示
-
-- 对比单工接收端确认：SSD1306驱动仅有ASCII 32~126字库，单工浏览页面底栏均使用ASCII。
-- 半双工历史列表/详情页原提示包含中文`英/数`和`发送`；UTF-8字节被OLED驱动替换为空白，因此底栏提示不完整或错位。
-- 历史列表底栏改为`[Fn]Back [Send]View`，对应英/数返回监听、发送查看当前消息。
-- 历史详情底栏改为`[Send]List L/R=Scroll`，对应发送返回列表、左右滚动；均在21字符（126像素）以内且只含ASCII。
-- Debug构建通过：FLASH 52352B，RAM 7176B。
-
-
-### 2026-07-11 — 与单工工程完全对齐的共享存储与界面
-
-- **共享存储**：半双工与单工接收端统一使用Flash Sector 4（0x08010000，64KB）；原Sector 3已不安全，因为半双工镜像约52KB会进入该区域。两端存储源码逐字节一致，并支持首次从旧Sector 3自动迁移。
-- **接收浏览内容**：历史列表和详情页与单工接收端使用相同标题、预览、来源ID、滚动布局和ASCII帮助栏：`[Mode]Back [Send]View`、`[Mode]List L/R=Scroll`。半双工仅保留物理`Fn`键作为Mode键的状态处理。
-- **发送编辑内容**：`editor.c`直接同步当前单工发送端，显示文本、光标、左下角字符计数/模式、右下角发送状态完全一致；仅将`KEY_MODE`映射为半双工物理`KEY_FN`，并保留RX切换所需的光标查询。
-- **保留差异**：仅保留半双工必须的RX/TX切换、RX采样外设启停和OLED熄屏/唤醒；这些不改变单工基准的页面内容。
-- Debug构建通过：FLASH 52600B，RAM 7176B。
-
-## 2026-07-11 - 外部 SPI Flash 启用
-- 三工程完成 PA4 CS、PA5/PA6/PA7 SPI1 与 PA9~PA12 键盘列配置复核。
-- 新增 PY25Q64HA 驱动，支持完整 8 MiB 24 位地址空间、跨页写、4 KiB 擦除、整片擦除和 JEDEC ID 0x852017 校验。
-- 接收端与半双工消息存储迁移到外部 Flash，统一版本 3 双副本格式，最多保存 64 条消息。
-- 双副本分别位于 0x000000 和 0x001000，写入后回读 CRC 校验，掉电时保留上一份有效数据。
-- 三工程 Debug 构建通过。
-
-## 2026-07-12 - 半双工双指示灯与状态机加固
-- PB10 LEDR 仅在 TX_Start 到 TX_ClearDone 的实际发送期间点亮；PB2 LEDG 在接收端确认首个有效数据符号后点亮，并在待机、切换发送和关机时熄灭。
-- 旧 PC13 LED 已固定关闭，不再参与通信指示。
-- 增加状态转换后等待松键保护，防止同一次长按/自动重复进入下一状态后再次触发删除、滚动或模式切换。
-- 接收完成优先于用户切换操作；64 条外部 Flash 消息列表按当前光标自动分页显示。
-
-## 2026-07-13 - 统一中文启动页
-- OLED 初始化后立即显示 2 秒中文开机页，再进入矩阵键盘初始化、设备编号输入及半双工默认接收模式。
-- 开机页采用专用 12x12 中文字模与 6x12 ASCII 字模，在 128x64 屏幕上将五行内容逐行居中：声语信使、通8-1、三位成员姓名及学号。
-- 移除了原英文半双工启动画面；完整开机页仅执行一次 OLED 刷新，不改变后续熄屏/唤醒与收发切换逻辑。
-- Debug 构建通过：FLASH 56472B，RAM 10384B。
-
-## 2026-07-13 - 启动页标题可读性提升
-- 根据实物屏可读性反馈，将首行调整为 16x16 大字“声语信使 通8-1”；标题总宽108像素，居中起点x=10。
-- 成员姓名与学号保留为三行12x12内容，起点y分别为20、34、48，确保完整显示在64像素高度内。
-- Debug构建通过：FLASH 56932B，RAM 10384B。
-
-## 2026-07-14 — 单项修复：Goertzel 纯载波取窗
-
-- 保留原 v4 的下降沿逐符号同步、包络门限、前导判定、20ms tone + 10ms guard、208 符号定长帧和 XOR 校验，未修改发送端。
-- 修复下降沿触发后的 Goertzel 输入：原代码对最近 320 点直接判频，混入当前 guard 的 5ms；现从 guard 前提取连续 160 点（10ms）纯载波。
-- Goertzel 初始化窗口同步为 160 点；1500/1800/2100/2400Hz 在 10ms、16kHz 采样下均为整数周期。
-- 已构建：`20260704_02` FLASH 43104B / RAM 9720B；`20260706_01` FLASH 56964B / RAM 10384B。仅保留既有 `rx_enter_error` 未使用警告。
-
-## 2026-07-14 — 跨帧重启前导吞失修复
-
-- 首帧成功、后续帧进入 `Incoming Data` 但无法解码的原因：主循环在首帧完成后重新启动 ADC/TIM 并调用 `RX_Start()`；原 `RX_Start()` 每次都把 `rx_startup_quiet_blocks` 清零，导致下一帧开始的 200ms 前导被静稳逻辑强制判为 LO。
-- 当前修复仅移除跨帧 `RX_Start()` 对静稳计数的清零；`RX_Init()` 仍在冷启动时设为 0，因此上电后的 200ms 模拟前端/ADC 静稳保护保留。
-- 后续帧重新监听时保留已完成的静稳状态，前导不再被吞失。
-- 已构建：`20260704_02` FLASH 43092B / RAM 9720B；`20260706_01` FLASH 56956B / RAM 10384B。仅保留既有 `rx_enter_error` 未使用警告。
-
-## 2026-07-14 — 撤回不稳定的取窗与跨帧试验
-
-- 实测反馈：纯 160 点取窗与跨帧静稳计数改动后，接收端出现首帧也无法完成、接收指示反复闪烁的状态机重置现象。
-- 已通过 Git 恢复 `Core/Inc/receiver.h` 与 `Core/Src/receiver.c` 到当前检出基线；上述两项试验代码已完全移除。
-- 已对三工程执行 clean-first 强制构建，避免残留 ELF：发送端 FLASH 33896B；独立接收端回到基线构建；半双工端 FLASH 56932B。
-- 后续暂停直接修改接收算法，必须先获取实测状态/符号计数/频谱数据再处理。
-
-
-## 2026-07-14 — v5 物理层/链路层重构 (针对 DSP 复核 5 大缺陷, 全量收发)
-
-按用户提供的 DSP 复核意见, 对收发双方与三个工程做协同重构. 新增可移植核心
-`voice_proto.h` / `voice_fec.c/.h` / `voice_dsp.c/.h`, 已在 PC 上用 gcc 做
-单元测试 + 声学信道仿真 + 收发全链路联调 (本沙箱无 arm-none-eabi, 未生成 ELF,
-需在真机烧录并声学实测).
-
-**逐条对应复核意见的修复:**
-
-1. **取消硬编码绝对幅值门限 (提升传输距离).** 删除 `FSK4_DECODER_MIN_AMPLITUDE`
-   峰峰值淘汰. 频率判决改为纯频谱置信度: 主频幅度² / 次强幅度² ≥ 1.6 才输出,
-   否则输出擦除符号 0xFF 交给 FEC. 仿真中 ~130mVpp (atten 0.05) 仍可解码,
-   而旧门限要求 ~806mVpp.
-
-2. **不再依赖 guard 下降沿做每符号时钟 (免疫室内混响).** 前导 (1500/2400 交替)
-   仅用于唤醒与导频校验; 新增 1800Hz 同步音 (前导中从不出现, 唯一) 作为精定时
-   锚点. 接收端回扫同步音上升沿, 一次性锁定 30ms(480 sample) 符号栅格, 之后
-   自由运行, 只取每个 20ms tone 的中间 10ms 做判决 — guard 里的混响残响不再
-   参与, 彻底消除"残响吞符号". 仿真 reverb≤0.6 可靠.
-
-3. **去直流/低频抑制加强.** 能量检测改用一阶差分 sum|x[n]-x[n-1]| (等效高通),
-   对 50Hz 工频与直流偏置免疫; Goertzel 判决窗用全 160-sample 均值去 DC.
-   仿真 DC 偏置 ±400 counts 全部通过. 唤醒门限改为 noise×1.5 (旧为 ×4 顶到天),
-   弱信号可正常入帧, 误唤醒由导频交替 + 同步音置信度拒绝.
-
-4. **时钟容忍度 / 频谱泄露.** Goertzel 每目标频率在 ±1 bin (±100Hz) 邻域取最大,
-   容忍晶振偏差与多普勒; 峰值比一票否决从 2.5x 放宽到 1.6x. (注: 实测两端均为
-   25MHz HSE→PLL→50MHz, 相对漂移 ~60ppm, N=160 窗 bin 间隔 100Hz, 四个目标
-   频率 k=15/18/21/24 均为整数, 泄露本就很小; 此项为加固而非主因.)
-
-5. **变长帧 + 前向纠错 (取代 6.64s 定长 + 裸 XOR).** 帧改为变长:
-   `[前导200ms][1800Hz同步音30ms][LEN(三重冗余)][payload+CRC8]`.
-   payload = [source_id, mask_lo, mask_hi, text...] 无填充. 每字节经 Hamming(7,4)
-   编码 (可纠 1 bit), 再对码字比特做块交织 (突发错误分散到不同码字), 最后每
-   2 bit 映射 1 个 4-FSK 符号. LEN 字节三重冗余 + 逐 bit 多数表决 (整帧单点故障).
-   CRC-8 (poly 0x07) 取代 XOR. 传输时间: 1 字符 2.0s, 48 字符 11.9s, 均 < 20s.
-   仿真: 连续 6 符号突发全部纠回.
-
-**PC 验证结果 (host gcc):**
-- FEC 单元测试: Hamming 全部单比特纠错 + CRC 敏感性 + 1~48 字符往返 + 1~6 符号
-  突发全恢复 → ALL PASS.
-- 声学信道仿真 (衰减/噪声/混响/直流/突发): realistic 包络全部通过.
-- 收发全链路 (transmitter.c → 信道 → receiver.c API): 广播/定向/地址过滤 ALL PASS.
-- 三工程各自真实头文件编译 + 链接检查: 0 error 0 warning.
-
-**保留不变:** 公开 API (TX_Start/IsBusy/IsDone/ClearDone, RX_Init/Start/Stop/
-ProcessHalfBuffer/IsDone/GetMessage/GetSourceId/滚动/显示等) 全部保持原签名,
-main.c / OLED / 键盘 / 编辑器 / Flash 存储 / 设备编号 / 地址过滤 / 软开关 / 中文
-启动页 / LED 逻辑均无需改动. CubeMX 引脚与定时器定义无变化 (TIM1/2/3 参数不变).
-旧 fsk4_decoder.c 已不再被调用 (保留在工程中, 编译无害).
-
-**新增源文件 (已加入各 CMakeLists.txt target_sources):**
-- 01 (TX): voice_fec.c
-- 02 (RX): voice_fec.c, voice_dsp.c
-- 06 (半双工): voice_fec.c, voice_dsp.c
-
-**待真机验证:**
-- [ ] 端到端声学收发 (v5 一次性同步 + 变长帧 + FEC)
-- [ ] 实际模拟前端噪声下的唤醒门限 (noise×1.5 + VD_EN_MIN=800 差分能量)
-- [ ] 1800Hz 同步音上升沿回扫在真实信道的定时精度
-- [ ] 首帧竞态: RX_Start 后立即收到帧时, 150ms 底噪标定不吞前导 (已加"疑似信号
-      即冻结标定"逻辑, 仿真通过, 需真机确认)
-- [ ] 传输距离与误码率标定
-
-## 2026-07-14 (补) — 提高噪声门限 + 修复首帧启动竞态 + 澄清 POWER_CTRL
-
-针对"静态底噪高、待机幽灵假锁、误码"反馈:
-- **抬高唤醒门限 (抗幽灵)**: `voice_dsp.c` 差分能量最小门限 `VD_EN_MIN` 800→2000,
-  固定余量 `VD_EN_MARGIN` 200→500. 门限 = noise×1.5 + 500, 且不低于 2000.
-  PC 验证: 连续 30s 纯噪声 (峰值最高 ~480 counts) 四档, 误唤醒 0 次、幽灵解码 0 次.
-  频谱置信度 `VD_CONF_RATIO` 保持 1.6 (提到 1.8 会在弱信号+混响下把有效符号误判擦除,
-  导致远距离 FEC 纠不回来; 1.6 是"抗噪 vs 距离"的实测平衡点). 门限是抗幽灵主力,
-  置信度是抗误码主力, 二者分工.
-- **修复首帧启动竞态**: 若 RX_Start 后紧接着就来帧, 原 150ms 底噪标定窗会把前导吞掉.
-  改为: 标定窗内只要能量越过唤醒门限即判"信号到达", 立即结束标定让本块正常入帧;
-  标定窗 30→15 块 (75ms). PC 全链路(100ms 前导余量)联调通过.
-- **澄清 POWER_CTRL (PB8) 不是收发音频开关**: 它是一键软开关的电源锁存脚
-  (默认 High 锁存供电, 拉低=切断 vbat 关机). 半双工 RX/TX 切换绝不能翻转它,
-  否则一进接收模式整机断电. 本设计的收发隔离靠软件启停 ADC/DMA/TIM 完成,
-  硬件上没有独立的 mic/功放使能引脚 (.ioc 中 GPIO 输出仅 键盘行/F_CS/LEDR/LEDG/
-  POWER_CTRL/LED, 无音频开关). 因此不修改任何 POWER_CTRL 相关逻辑.
-
-## 2026-07-14 (补) — 1500Hz 频响补偿加权
-
-- 声学链路(扬声器+RC低通+麦克风+运放)对 1500Hz 增益偏低, 使 digit0 的 Goertzel 幅度天生弱于其它三音.
-- 在 voice_dsp.c 新增 vd_freq_weight[4]={1.25f,1.0f,1.0f,1.0f}, 在 VoiceDSP_Classify 里对每个频点的 mag² 乘权.
-- 1500Hz 判决量×1.25 (“别人1倍、它1.25倍”再比), 同时影响主/次频选择与置信度 ratio.
-- PC 验证: 1500 弱信号稳定解为 digit0; 1800Hz 不会被误偷为 1500; 全链路/仿真/幽灵测试均通过. 实测若仍偏弱可继续上调 vd_freq_weight[0].
-- 三工程 voice_dsp.c 逐字节一致 (01 为 TX 不编译该文件, 无害).
-
-## 2026-07-14 (补2) — 接收端第二级放大改用 PGA112 + ADC 反馈 AGC
-
-第二级放大 (进 ADC 前) 换成 TI PGA112 可编程增益放大器, 由 MCU 经 SPI2 控制增益,
-并根据 ADC 采样做自动增益 (AGC). 接收端 02 与半双工 06 同步实现.
-
-**硬件 (CubeMX 已配, 未改引脚定义)**:
-- SPI2: PB13=SCK, PB15=MOSI (Simplex_Bidirectional_Master, 只发不收), Mode0/MSB/8bit.
-- CS: PB12 (PG112_CS), 软件控制, 默认 High.
-
-**新增 `pga112.c/.h`** (已加入两工程 CMakeLists):
-- PGA112_Init(): 上电复位 + 设初始增益 8x (用户选定).
-- PGA112_SetGain(code): 经 SPI2 盲写 {0x2A, (gain<<4)|CH0}.
-- PGA112_AGC_Update(samples, len, frame_active): 在 ADC HT/TC 回调里调用.
-  - 削顶保护 (触及量程两端 <64 counts) → 即时降一档;
-  - 幅度过高 (单边 ≥1680) → 降档; 持续过低 (单边 ≤450, 连续 8 块) → 升档;
-  - 目标窗口 ~22%~82% 满量程, 带迟滞;
-  - **仅监听态调增益, RX_IsFrameActive() 为真 (PREAMBLE/DATA) 时冻结** —
-    避免帧中途增益跳变干扰 v5 差分能量/频谱同步.
-- 增益档 0..7 = 1/2/4/8/16/32/64/128 倍 (PGA112 binary).
-
-**与 v5 判决互补**: v5 用频谱置信度判频 (不看绝对幅值), AGC 只负责把信号维持在
-ADC 动态范围的合理区间 (近距离不削顶, 远距离不淹没于量化噪声), 二者不冲突.
-
-**⚠ 协议常量待手册确认**: 命令字节 0x2A、增益/通道位序 (高4增益/低4通道)、
-通道 CH0=0、SPI Mode0 均按 TI PGA112 标准数据手册; 若实测手册不同, 改 pga112.h 顶部宏即可.
-
-**PC 验证**: AGC 决策逻辑单元测试全过 (init 8x/SPI 字节 0x2A+0x30、削顶降档、
-锁帧冻结、过高降档、持续弱升档、窗口内迟滞、min/max 钳位); pga112.c 用真实工程
-头文件编译 0 error. 无 arm-none-eabi 未生成 ELF, **待真机验证 SPI 波形与增益档实际倍率**.
-
-**同批修复 (git 误操作损坏)**: 本次发现 git 回退/清理把接收端多个文件截断损坏,
-已全部恢复: 02 的 main.c/main.h/fsk4_decoder.c/.h/stm32f4xx_hal_msp.c 及被删的
-voice_proto.h/voice_fec.c/.h/voice_dsp.c/.h; 06 的 main.c/main.h/hal_msp.c/pwm_dds.h
-(06 从其 git HEAD 恢复, 02 从半双工 06 的完好副本恢复). 恢复后逐文件校验完整.
-
-## 2026-07-14 (补3) — PGA112 数据手册核对 + 命令修正
-
-对照接收端文件夹内 pga112.pdf (TI SBOS424C) 核对协议, 修正一处错误:
+对照 pga112.pdf (TI SBOS424C) 核对协议, 修正一处错误:
 - **删除伪造的 reset 命令 0x20** (手册中不存在). 上电 POR 后增益/通道寄存器本为
   全 0 (增益=1, 通道=VCAL/CH0), 无需 reset. Init 改为发 SDN_DIS (0xE1 0x00) 退出
   关机模式再写增益.
-- **WRITE 命令确认无误**: 高字节 0x2A, 低字节 = [G3G2G1G0(高4)] | [CH3CH2CH1CH0(低4)] (Table 3).
-- **增益码确认**: binary 增益 0..7 = 1/2/4/8/16/32/64/128; 8x = 码 3 (Table 5).
-- **通道确认**: 信号接 VCAL/CH0 (第3脚), 通道码 = 0x0 (Table 6). 8x+CH0 低字节 = 0x30.
-- **SPI 时序确认**: Mode 0 (CPOL=0 空闲低, CPHA=0 上升沿采样); CS 低有效; CS 拉低到
-  拉高间须为 16 时钟整数倍 (我们发 2 字节=16bit, 满足); 最大 SCLK 10MHz (我们 ~1.5MHz).
-  → 与 CubeMX 现有 SPI2 配置 (Mode0/MSB/8bit) 完全一致, 无需改 CubeMX.
-- pga112.h 顶部宏已按手册标注来源 (Table 3/5/6). AGC 单元测试全过, 两工程编译 0 error.
+- **WRITE 命令确认**: 高字节 0x2A, 低字节 = [G3G2G1G0(高4)] | [CH3CH2CH1CH0(低4)].
+- **增益码确认**: binary 增益 0..7 = 1/2/4/8/16/32/64/128; 32x = 码 5.
+- **SPI 时序确认**: Mode 0 (CPOL=0, CPHA=0); CS 低有效; 与 CubeMX 现有 SPI2 配置完全一致.
 
-## 2026-07-14 (补4) — 进门严格化 + 灯只在数据段亮 (消除噪声误唤醒/乱闪)
+### 2026-07-14 (补4) — 进门严格化 + 灯只在数据段亮 (消除噪声误唤醒/乱闪)
 
-问题: 待机(尤其 ADC 悬空或强背景噪声)时接收指示灯一直闪. 根因: LISTEN→PREAMBLE
-的进门闸只看"连续 6 块高能量", 不验证频率结构; 噪声能量偶尔连续超门限即误进
-PREAMBLE(灯亮), 拿不到导频交替/同步音后超时退回 LISTEN(灯灭), 如此往复.
+**改动1 (voice_dsp.c)**: 连续 6 块高能量后, 追加要求最近 160 样本经 Goertzel 分类
+必须为 1500Hz 或 2400Hz 导频音, 才进 PREAMBLE.
+**改动2 (receiver.c)**: 点灯条件从"PREAMBLE 或 DATA"改为"仅 DATA".
 
-**改动1 (voice_dsp.c, LISTEN 进门加导频验证)**: 连续 6 块高能量后, 追加要求最近
-160 样本经 Goertzel 分类必须为 1500Hz 或 2400Hz 导频音, 才进 PREAMBLE. 纯噪声频谱
-平坦→置信度不足→判 0xFF 擦除→进不来. 窄带单音(工频谐波/PWM 泄漏/非导频频率)也
-因不是 1500/2400 被挡. 进门同时记下首个导频到 pilot_last, 供后续交替计数.
+### 2026-07-11 — 提高②③⑥⑦：半双工、可靠接收与低功耗
 
-**改动2 (receiver.c, 灯只在 DATA 亮)**: 点灯条件从"PREAMBLE 或 DATA"改为"仅 DATA".
-即使偶发误进前导, 只要没锁上同步进入数据段, 灯就不亮 → 视觉上不再闪. 接收成功
-(DONE) 点亮逻辑保留.
+- **PGA112 AGC**: 第二级放大改用 PGA112 可编程增益放大器, SPI2 控制.
+  - 削顶保护 (触及量程两端) → 即时降一档
+  - RMS 双门限 + Vpp 辅助判定
+  - 增益档 0..7 = 1/2/4/8/16/32/64/128 倍
+- **半双工资源互斥**：RX 进入编辑/发送前统一停止 ADC DMA、TIM2 与接收状态机.
+- **可靠性**：接收端增加背景噪声 IIR 基线和自适应包络门限；Goertzel 改用每窗口动态直流均值.
+- **Flash 存储迁移**: 从内部 Flash Sector 3 迁移到外部 PY25Q64 SPI Flash.
 
-**DATA 段未改** (用户要求保持现状): 中途放弃逻辑(连续 500ms 静音、LEN 非法)不变.
+### 2026-07-10 — 多终端通信 + 开机设置设备编号 + 硬件锁存软开关
 
-**PC 验证**: (1) 真实帧仍正常 PREAMBLE→DATA→CRC 通过, 解码正确; (2) 全链路 FULLSTACK
-ALL PASS; (3) 声学信道仿真 ALL PASS; (4) 进门闸测试: 白噪声/1000/1650/3000Hz单音/
-50Hz工频 误进 PREAMBLE 均 0 次. 02 与 06 的 voice_dsp.c/receiver.c 逐字节一致.
-无 arm-none-eabi 未生成 ELF, 待真机验证悬空/背景噪声下灯不再乱闪.
+- 支持 ID 1~9、任意多选目标及广播.
+- 收件人页：1~9 切换目标，0 广播，发送确认.
+- 开机动态选择设备编号 (SelectDeviceId).
+- PB1=POWER_BUTTON (EXTI1), PB8=POWER_CTRL (硬件锁存).
+- BOR 防重启等待, 开机按键松手检测 + 50ms 防抖.
+- EXTI 回调立即解除电源锁存；主循环停止所有外设后等待硬件掉电.
+
+### 2026-07-08 (CubeMX 重生成后修复)
+
+- **GPIO 重分配**: 键盘矩阵改为全部 GPIOA (PA0~PA3 rows, PA9~PA12 cols).
+- keyboard.c 移除 `col_ports[4]`，恢复单 `COL_PORT` 宏.
+- 修复 LED 初始态 `GPIO_PIN_RESET` → `GPIO_PIN_SET`.
+- 清理 receiver.c `rx_enter_error` 死代码注释.
+
+### 2026-07-07 — 从单工合并修复
+
+- 新增 flash_store.c/h (当时为内部Flash非易失存储, 5条循环缓冲).
+- 修复 LED 初始状态 GPIO_PIN_RESET→GPIO_PIN_SET (上电熄灭).
+- 修复 RX Done 处理顺序 (先显示"Rx Complete"2s → 再清除重启).
+- 新增 RX 子模式 (LS_LISTENING/BROWSE_LIST/BROWSE_VIEW, KEY_FN切换).
+- 新增 FlashStore_Init 初始化调用.
+- 新增 receiver.c 自动保存 (rx_enter_done → FlashStore_SaveMessage).
+
+---
+
+## 七、待完成
+
+- [ ] 硬件联调: 半双工模式切换 (RX↔TX) 无外设资源冲突
+- [ ] 端到端收发测试 (两板对调)
+- [ ] PA0 一键开关机 Standby 唤醒电流 ≤1mA
+- [ ] 突发模式 AGC: 远距离弱信号接收距离提升验证
+- [ ] 数据段增益冻结后符号擦除率是否显著下降
+- [ ] CRC 符号丢失率是否下降 (30ms 保护槽效果)
+- [ ] True SNR 对宽带噪声(风扇/空调)的免疫验证
+- [ ] 前导双重频域锁: 误唤醒率为零的验证
+- [ ] PGA112 32x 初始增益实机验证
+- [ ] PY25Q64 SPI Flash 读写稳定性验证
+- [ ] CMakeLists.txt 移除死代码 fsk4_decoder.c + fsk16_encoder.c
+- [ ] receiver.h 清理 v4 遗留宏
