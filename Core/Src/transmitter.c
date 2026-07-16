@@ -1,20 +1,19 @@
 /**
   ******************************************************************************
   * @file           : transmitter.c
-  * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音)
+  * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音 + ACK)
   *
   *   帧结构 (与接收端 voice_dsp/voice_fec 严格对应):
-  *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 (无 guard) — 唤醒/导频
+  *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 — 唤醒/导频
   *     SYNC      : 1800Hz 20ms 单音 + 10ms guard — 唯一精定时锚点
-  *     DATA      : 变长, 每符号 20ms tone + 10ms guard (1.65V DC)
-  *                 符号 = VoiceFEC_BuildDataSymbols(payload) 的输出
-  *                 payload = [source_id, mask_lo, mask_hi, text...] (变长)
+  *     DATA      : 变长, 每符号 20ms tone + 10ms guard
   *     POSTAMBLE : 120ms 2400Hz 连续音
   *
   *   时序 (16 kHz tick = 62.5us):  tone=320, guard=160, slot=480 ticks.
   *
+  *   v5.1 新增 ACK 模式: TX_SendAck() → 100ms 1500Hz 突发.
+  *
   *   由 TIM3 ISR (16kHz) 驱动: HAL_TIM_PeriodElapsedCallback → TX_Tick → PWM_DDS_Tick.
-  *   公开 API 与旧版一致 (TX_Init/Start/Tick/IsBusy/IsDone/ClearDone), main.c 不变.
   ******************************************************************************
   */
 #include "transmitter.h"
@@ -30,6 +29,7 @@
 #define TICKS_PREAMBLE       ((VP_PREAMBLE_MS  * TICK_FREQ) / 1000)  /* 3200 */
 #define TICKS_POSTAMBLE      ((VP_POSTAMBLE_MS * TICK_FREQ) / 1000)  /* 1920 */
 #define TICKS_PILOT_PERIOD   ((VP_PILOT_PERIOD_MS * TICK_FREQ) / 1000) /* 640 */
+#define TICKS_ACK            1600U  /* 100ms @ 16kHz */
 
 /* 状态 */
 #define ST_IDLE       0
@@ -38,23 +38,27 @@
 #define ST_DATA       3
 #define ST_POSTAMBLE  4
 #define ST_DONE       5
+#define ST_ACK        6
 
 static uint8_t   tx_state;
-static uint32_t  tx_tick;         /* 阶段内 tick */
-static uint16_t  tx_slot_tick;    /* 当前符号槽内 tick 0..479 */
-static uint16_t  tx_sym_idx;      /* 数据符号索引 */
-static uint16_t  tx_sym_count;    /* 数据符号总数 */
+static uint32_t  tx_tick;
+static uint16_t  tx_slot_tick;
+static uint16_t  tx_sym_idx;
+static uint16_t  tx_sym_count;
 static uint8_t   tx_pilot_phase;
 static uint8_t   tx_done_flag;
+static uint16_t  tx_ack_tick;
 static uint8_t   tx_symbols[VP_MAX_DATA_SYMBOLS];
 
 extern TIM_HandleTypeDef htim3;
 
-static const char *state_names[6] =
-    {"IDLE", "PREAMBLE", "SYNC", "DATA", "POSTAMBLE", "DONE"};
+static const char *state_names[7] =
+    {"IDLE", "PREAMBLE", "SYNC", "DATA", "POSTAMBLE", "DONE", "ACK"};
 
 static void tx_set_symbol(uint8_t digit) { PWM_DDS_SetFreq(digit); }
 static void tx_guard(void)               { PWM_DDS_OutputMidscale(); }
+
+/* ── 公开 API (main.c 不变) ── */
 
 void TX_Init(void)
 {
@@ -62,11 +66,11 @@ void TX_Init(void)
     tx_tick = 0; tx_slot_tick = 0;
     tx_sym_idx = 0; tx_sym_count = 0;
     tx_pilot_phase = 0; tx_done_flag = 0;
+    tx_ack_tick = 0;
 }
 
 void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
 {
-    /* 组装 payload = [src, mask_lo, mask_hi, text...] (变长, 不填充) */
     if (source_id < NET_MIN_DEVICE_ID || source_id > NET_MAX_DEVICE_ID)
         source_id = NET_MIN_DEVICE_ID;
     target_mask &= NET_VALID_TARGET_MASK;
@@ -90,6 +94,22 @@ void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
     HAL_TIM_Base_Start_IT(&htim3);
 }
 
+/* ── v5.1 ACK 发送: 100ms 1500Hz 纯音 ── */
+void TX_SendAck(void)
+{
+    tx_ack_tick = 0;
+    tx_state = ST_ACK;
+    tx_done_flag = 0;
+    PWM_DDS_Start();
+    PWM_DDS_SetFreq(VP_PILOT_LO);
+    HAL_TIM_Base_Start_IT(&htim3);
+}
+
+uint8_t TX_IsAckDone(void)
+{
+    return (tx_state == ST_IDLE && tx_ack_tick >= TICKS_ACK) ? 1U : 0U;
+}
+
 void TX_Tick(void)
 {
     if (tx_state == ST_IDLE || tx_state == ST_DONE) return;
@@ -104,7 +124,7 @@ void TX_Tick(void)
         if (tx_tick >= TICKS_PREAMBLE) {
             tx_state = ST_SYNC;
             tx_slot_tick = 0;
-            tx_set_symbol(VP_SYNC_DIGIT);   /* 1800Hz 同步音 */
+            tx_set_symbol(VP_SYNC_DIGIT);
         }
         break;
 
@@ -121,15 +141,11 @@ void TX_Tick(void)
 
     case ST_DATA:
         if (tx_sym_idx >= tx_sym_count) {
-            /* 最后一个数据符号之后: 插入 30ms (480 tick) DC 保护槽,
-               将 postamble 的 2400Hz 连续音与最后一个符号的 Goertzel
-               判决窗物理隔离, 防止 postamble 能量渗入导致 CRC 符号擦除.
-               每 tick 调 tx_guard() 保持 midscale 输出. */
             tx_guard();
             if (tx_slot_tick >= TICKS_SLOT) {
                 tx_state = ST_POSTAMBLE;
                 tx_tick = 0;
-                tx_set_symbol(VP_PILOT_HI);   /* 2400Hz 结束音 */
+                tx_set_symbol(VP_PILOT_HI);
             }
         } else {
             if (tx_slot_tick == TICKS_TONE) {
@@ -137,10 +153,8 @@ void TX_Tick(void)
             } else if (tx_slot_tick >= TICKS_SLOT) {
                 tx_slot_tick = 0;
                 tx_sym_idx++;
-                if (tx_sym_idx < tx_sym_count) {
+                if (tx_sym_idx < tx_sym_count)
                     tx_set_symbol(tx_symbols[tx_sym_idx]);
-                }
-                /* sym_idx 已到末尾: 下一 tick 进入上方保护槽分支 */
             }
         }
         break;
@@ -154,11 +168,26 @@ void TX_Tick(void)
             return;
         }
         break;
+
+    /* ── v5.1 ACK 突发 ── */
+    case ST_ACK:
+        if (tx_ack_tick >= TICKS_ACK) {
+            tx_state = ST_IDLE;
+            tx_done_flag = 0;
+            PWM_DDS_OutputMidscale();
+            HAL_TIM_Base_Stop_IT(&htim3);
+            return;
+        }
+        break;
+
+    default:
+        break;
     }
 
     PWM_DDS_Tick();
     tx_tick++;
     tx_slot_tick++;
+    if (tx_state == ST_ACK) tx_ack_tick++;
 }
 
 uint8_t TX_IsBusy(void)
@@ -172,6 +201,7 @@ void TX_ClearDone(void)
 {
     tx_done_flag = 0;
     tx_state = ST_IDLE;
+    tx_ack_tick = 0;
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
     PWM_DDS_OutputMidscale();
     HAL_TIM_Base_Stop_IT(&htim3);
@@ -179,7 +209,7 @@ void TX_ClearDone(void)
 
 const char* TX_GetStateName(void)
 {
-    if (tx_state <= 5) return state_names[tx_state];
+    if (tx_state <= 6) return state_names[tx_state];
     return "?";
 }
 

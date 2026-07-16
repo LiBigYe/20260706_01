@@ -1,0 +1,102 @@
+*** Begin Patch
+*** Update File: D:\Projects\stm32\stm32f411ceu6\20260706_01\Core\Inc\voice_dsp.h
+@@ -12,12 +12,20 @@
+  *   (1) 无绝对峰峰值硬门限. 频率判决只看相对频谱置信度.
+  *   (2) 一次性同步: 前导确认 + 1800Hz 同步音锁定符号栅格, 之后按
+  *       固定 480-sample(30ms) 栅格自由运行, 不再依赖每符号 guard 下降沿.
+- *       取样窗口是每符号 tone 的中间 10ms (block 1..2), 前后各留 5ms
+- *       余量吸收 ±5ms 栅格抖动与混响拖尾.
++ *       v5.1 多窗口: 取满 20ms tone (320 samples), 做 3 个重叠
++ *       Goertzel 窗 (offset 40/80/120, N=160), 累加 mag² 以提升 SNR.
+  *   (3) 能量检测用一阶差分 sum|x[n]-x[n-1]| (等效高通), 对 DC/50Hz 免疫;
+  *       Goertzel 前按窗口均值去 DC.
+- *   (4) Goertzel 对每个目标频率在 ±1 bin 邻域取最大, 容忍晶振/多普勒频偏;
+- *       峰值比一票否决放宽为 1.15x.
++ *   (4) v5.1 自适应 SNR 门限: 前导段累加 SNR 取均值, 数据段门限 =
++ *       max(VD_SNR_MIN, preamble_mean_snr × 0.5).
+  *   (5) 输出符号数组 + 每符号的 4 频 mag² 交给 voice_fec 做软判决
+- *       (Hamming+CRC 保留硬判决作为 fast path).
++ *       FEC (本文件不含 FEC, mag² 供软判决使用).
+  ******************************************************************************
+@@ -33,11 +41,15 @@
+ #define VD_BLOCKS_TONE   4U     /* 20ms tone = 4 块 */
+ #define VD_BLOCKS_GUARD  2U     /* 10ms guard = 2 块 */
+ #define VD_BLOCKS_SLOT   6U     /* 30ms 槽 = 6 块 */
+-#define VD_WIN          160U    /* Goertzel 判决窗 (中间 10ms, k 全整数) */
+-#define VD_WIN_OFFSET    80U    /* 窗在 tone 内的起点 (跳过第 1 块 onset) */
++#define VD_WIN          160U    /* Goertzel 判决窗 (10ms, k 全整数) */
++#define VD_TONE_SAMPLES 320U    /* 完整 20ms tone 采样 (供多窗口) */
++#define VD_WIN_OFFSET     0U    /* 窗在 tone 内的起点 (v5.1: 取满 20ms) */
++
++/* ── v5.1 多窗口 Goertzel ── */
++#define VD_MULTI_WIN_COUNT   3U
++#define VD_MULTI_WIN_OFFSETS {40U, 80U, 120U}  /* 3 窗在 320 样本 tone 内的起点 */
+ 
+ /* 接收状态 */
+ #define VD_LISTEN     0U
+ #define VD_PREAMBLE   1U
+@@ -45,6 +57,9 @@
+ #define VD_DONE       3U
+ 
++/* ── v5.1 自适应 SNR ── */
++#define VD_SNR_MIN         2.0f   /* 绝对 SNR 下限 (6dB) */
++
+ typedef struct {
+     uint8_t  state;
+ 
+@@ -64,13 +79,26 @@
+ 
+     /* 数据栅格自由运行 */
+     uint16_t slot_block;       /* 当前槽内块号 0..5 */
+-    uint16_t win_fill;         /* 判决窗已填样本 */
+-    uint16_t win_buf[VD_WIN];  /* 判决窗采样 */
++    uint16_t win_fill;         /* tone 窗已填样本 (0..VD_TONE_SAMPLES) */
++    uint16_t win_buf[VD_TONE_SAMPLES];  /* 完整 20ms tone 采样 (v5.1: 320) */
+     uint16_t sym_count;        /* 已解符号数 */
+     uint16_t sym_expected;     /* 由 LEN 前缀求得的期望符号数 (0=未知) */
+     uint8_t  symbols[VP_MAX_DATA_SYMBOLS];
+ 
+-    /* 结果 */
++    /* ── v5.1 软判决: 每符号 4 频 Goertzel mag² ── */
++    float    sym_mag2[VP_MAX_DATA_SYMBOLS][4];
++
++    /* ── v5.1 自适应 SNR 门限 ── */
++    float    preamble_snr_sum;     /* 前导段 SNR 累加 */
++    uint8_t  preamble_snr_count;  /* 前导段 SNR 计数 */
++    float    data_snr_threshold;  /* 数据段 SNR 门限 (动态) */
++
++    /* 状态跟踪 (频域判决, 不依赖时域能量) */
++    uint8_t  pilot_hits;       /* 前导频域命中计数 (连续 Goertzel 判为导频的次数) */
++    uint8_t  erase_run;        /* 数据段连续擦除计数 (Goertzel 返回 0xFF 的符号数) */
++    /* 结果 */
+     uint8_t  payload[VP_MAX_PAYLOAD_BYTES];
+     uint8_t  payload_len;
+     uint8_t  crc_ok;
+@@ -87,13 +115,24 @@
+ 
+ /* Goertzel: 对 win[0..N-1] 去 DC 后计算 4 个目标频率(±1 bin)的幅度²,
+- * 返回主频 digit(0..3), 若置信度不足返回 0xFF. conf_out 可为 NULL. */
+-uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N, float *conf_out);
++ * 返回主频 digit(0..3), 若置信度不足返回 0xFF.
++ * conf_out 可为 NULL, mag2_out[4] 可为 NULL (每 bin 的 mag²).
++ * v5.1: mag2_out 供软判决 FEC 使用. */
++uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N,
++                          float *conf_out, float *mag2_out);
+ 
++/* ── v5.1 多窗口分类: 对 tone[0..tone_len-1] 做 3 窗口 Goertzel,
++ * 累加 mag², 再做 True SNR 判决. snr_threshold 为自适应门限.
++ * mag2_out[4] 接收累加后的 mag² (供软判决). */
++uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
++                               float snr_threshold,
++                               float *conf_out, float *mag2_out);
++
+ /* 一阶差分能量 (高通, 免疫 DC/50Hz) */
+ uint32_t VoiceDSP_DiffEnergy(const uint16_t *blk, uint16_t n);
+ 
+ void     VoiceRx_Init(VoiceRx *rx);
+ void     VoiceRx_Start(VoiceRx *rx);
+ /* 送入一个 80-sample 块, 推进状态机. 返回 1 表示本块后 state==VD_DONE. */
++/* v5.1: 符号判决结果同时写入 rx->sym_mag2[][] 供软判决 FEC. */
+ uint8_t  VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code);
+ /* DONE 后取结果: payload+len, crc_ok. */
+*** End Patch

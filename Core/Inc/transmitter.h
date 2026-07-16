@@ -55,6 +55,10 @@ void      TX_Tick(void);           /* 由 TIM3 ISR 调用 */
 uint8_t   TX_IsBusy(void);
 uint8_t   TX_IsDone(void);
 void      TX_ClearDone(void);
+/* ── v5.1 ACK ── */
+void      TX_SendAck(void);
+uint8_t   TX_IsAckDone(void);
+
 const char* TX_GetStateName(void);
 
 #ifdef __cplusplus
@@ -62,3 +66,4 @@ const char* TX_GetStateName(void);
 #endif
 
 #endif /* __TRANSMITTER_H */
+

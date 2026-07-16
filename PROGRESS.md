@@ -1,7 +1,7 @@
 # 声语信使 — 半双工项目进度文档
 
 > 最后更新: 2026-07-16
-> 阶段: v5.1 True SNR 分类器 + 频域抗噪重构
+> 阶段: v5.1 多窗口 Goertzel + 自适应 SNR + 软判决 Chase + ACK 协议
 
 ---
 
@@ -258,6 +258,49 @@ receiver.c / voice_fec.c / voice_dsp.c):
 
 ---
 
+### 2026-07-16 (v5.1 重大升级) — 多窗口 Goertzel + 自适应 SNR + 软判决 FEC + ACK 协议
+
+**方案1 — 多窗口 Goertzel 累加** (oice_dsp.c):
+- 取满 20ms tone (320 samples), 做 3 个重叠 Goertzel 窗 (offset 40/80/120, N=160).
+- 累加 3 窗 mag² 再做 True SNR 判决 → ~4.8dB SNR 增益.
+- win_buf 从 160 扩展到 320 samples. VD_WIN_OFFSET 从 80 改为 0.
+- 新增 VoiceDSP_ClassifyMulti() 函数.
+
+**方案2 — 软判决 FEC 解码** (oice_fec.c):
+- LUT 查表法 LLR: 256 项 ln(x) 预计算表, 覆盖比率 1.0~100.6.
+- 4-FSK digit→bits 映射: bit0 用 mag[1]+mag[3] vs mag[0]+mag[2], 类似 bit1.
+- Chase 软 Hamming 解码: 找 2 个最不可靠 bit, 试 4 种翻转组合, 取最小软距离.
+- 新增 VoiceFEC_ParseDataSymbolsSoft() 接口.
+- VoiceRx 结构体新增 sym_mag2[385][4] 数组 (6160B).
+- 老 ParseDataSymbols 回退到软判决内部实现.
+
+**方案5 — 半双工 ACK 协议** (	ransmitter.c + main.c):
+- 发送端: 新增 ST_ACK 状态, TX_SendAck() 发 100ms 1500Hz 纯音.
+- 接收端: 收到有效帧后自动回复 ACK.
+- 发送端等待: TX_DONE → 切换 RX → VoiceDSP_Classify 检测 1500Hz (3 次连续命中).
+- 500ms 超时 → "No ACK", 否则 "Sent OK!".
+- 新增 TX_IsAckDone() 查询接口.
+
+**方案7 — 自适应 SNR 门限** (oice_dsp.c):
+- VD_PREAMBLE 期间累加每次 Goertzel 的 SNR 值.
+- 进入 VD_DATA 时: data_snr_threshold = max(VD_SNR_MIN, preamble_mean_snr × 0.5).
+- 强信号从严, 弱信号从宽.
+- VoiceRx 新增 preamble_snr_sum, preamble_snr_count, data_snr_threshold 字段.
+
+**修改文件清单**:
+| 文件 | 改动 |
+|------|------|
+| voice_dsp.h | +VD_TONE_SAMPLES, +sym_mag2, +自适应SNR字段, +VoiceDSP_ClassifyMulti |
+| voice_dsp.c | 完整重写: 多窗口+自适应SNR+mag2输出+数据填满20ms |
+| voice_fec.h | +VoiceFEC_ComputeLLR, +VoiceFEC_ParseDataSymbolsSoft |
+| voice_fec.c | +256项 LLR LUT, +Chase软解码, +LLR反交织 |
+| transmitter.h | +TX_SendAck, +TX_IsAckDone |
+| transmitter.c | +ST_ACK状态, +TX_SendAck实现 |
+| main.c | +voice_dsp.h include, +ACK发送(RX侧), +ACK等待(TX侧) |
+
+**编译结果**: FLASH 63556B (+14KB), RAM 17960B (+11KB). 0 error, 0 warning.
+
+
 ## 七、待完成
 
 - [ ] 硬件联调: 半双工模式切换 (RX↔TX) 无外设资源冲突
@@ -270,5 +313,5 @@ receiver.c / voice_fec.c / voice_dsp.c):
 - [ ] 前导双重频域锁: 误唤醒率为零的验证
 - [ ] PGA112 32x 初始增益实机验证
 - [ ] PY25Q64 SPI Flash 读写稳定性验证
-- [ ] CMakeLists.txt 移除死代码 fsk4_decoder.c + fsk16_encoder.c
+- [x] ~~CMakeLists.txt 移除死代码~~ fsk4_decoder.c + fsk16_encoder.c (保留: 仍有编译引用, 暂不删除)
 - [ ] receiver.h 清理 v4 遗留宏

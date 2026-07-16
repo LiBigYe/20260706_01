@@ -22,6 +22,7 @@
 #include "flash_store.h"
 #include "network_protocol.h"
 #include "pga112.h"
+#include "voice_dsp.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -456,6 +457,14 @@ int main(void)
         /* ── 接收完成: 2s 显示 → 自动重启 ── */
         if (RX_IsDone()) {
             HM_SaveReceivedMessage();
+
+            /* ── v5.1: Send ACK (100ms 1500Hz burst) ── */
+            TX_SendAck();
+            while (!TX_IsAckDone()) { HAL_Delay(5); }
+            TX_ClearDone();
+            PWM_DDS_Shutdown();
+            /* ADC/TIM2 were stopped by HM_SaveReceivedMessage; restart after display */
+
             const char *rx_msg = RX_GetMessage();
             uint8_t    rx_len  = RX_GetMessageLength();
             uint8_t rls[50], rll[50], rtl = 0; uint16_t rp = 0;
@@ -774,10 +783,46 @@ int main(void)
         if (TX_IsDone()) {
             Editor_SetTxStatus("Tx Complete");
             Editor_UpdateDisplay();
-            HAL_Delay(1500);
-            /* 发完回到编辑模式, 保留编辑器内容 (与发送端单工一致) */
+            HAL_Delay(300);
+
+            /* ── v5.1: Switch to RX and listen for ACK (1500Hz) ── */
             TX_ClearDone();
             PWM_DDS_Shutdown();
+            HM_StartRxSampling();
+
+            uint32_t ack_start = HAL_GetTick();
+            uint8_t  ack_hits = 0;
+            uint32_t ack_last_check = ack_start;
+            uint8_t  got_ack = 0;
+
+            while ((HAL_GetTick() - ack_start) < 600) {
+                uint32_t now2 = HAL_GetTick();
+                if ((now2 - ack_last_check) >= 30) {
+                    ack_last_check = now2;
+                    /* Sample 160 samples from DMA circular buffer */
+                    uint16_t ndtr = __HAL_DMA_GET_COUNTER(&hdma_adc1);
+                    uint16_t pos = (ADC_BUF_SIZE - ndtr) % ADC_BUF_SIZE;
+                    uint16_t win[160];
+                    uint16_t start = (pos + ADC_BUF_SIZE - 160) % ADC_BUF_SIZE;
+                    for (int i = 0; i < 160; i++)
+                        win[i] = adc_dma_buf[(start + i) % ADC_BUF_SIZE];
+                    float conf;
+                    uint8_t d = VoiceDSP_Classify(win, 160, &conf, NULL);
+                    if (d == 0 && conf > 2.0f) {
+                        ack_hits++;
+                        if (ack_hits >= 3) { got_ack = 1; break; }
+                    } else {
+                        ack_hits = 0;
+                    }
+                }
+                HAL_Delay(10);
+            }
+
+            HM_StopRxSampling();
+            Editor_SetTxStatus(got_ack ? "Sent OK!" : "No ACK");
+            Editor_UpdateDisplay();
+            HAL_Delay(1500);
+
             hm_mode = HM_TX_EDIT;
             transition_key_lock = 1U;
             Editor_SetTxStatus("Tx Ready");
