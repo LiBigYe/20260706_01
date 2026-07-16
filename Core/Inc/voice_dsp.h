@@ -71,9 +71,13 @@ typedef struct {
     uint8_t  payload_len;
     uint8_t  crc_ok;
 
+    /* 状态跟踪 (频域判决, 不依赖时域能量) */
+    uint8_t  pilot_hits;       /* 前导频域命中计数 (连续 Goertzel 判为导频的次数) */
+    uint8_t  erase_run;        /* 数据段连续擦除计数 (Goertzel 返回 0xFF 的符号数) */
+
     /* 诊断 (可读, 不参与判决) */
     uint8_t  last_digit;
-    float    last_conf;
+    float    last_conf;        /* True SNR (v5.1), 非旧的 best/second 比值 */
 } VoiceRx;
 
 /* Goertzel: 对 win[0..N-1] 去 DC 后计算 4 个目标频率(±1 bin)的幅度²,

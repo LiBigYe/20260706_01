@@ -244,6 +244,13 @@ void RX_GetLastSymbol(uint8_t *digit, float *mag)
     if (mag) { for (uint8_t i = 0; i < 4; i++) mag[i] = rx_last_mag[i]; }
 }
 
+/* ---- v5.1 诊断 getter (供 LiveWatch 实时监控) ---- */
+uint8_t RX_GetPilotHits(void)   { return vrx.pilot_hits; }
+uint8_t RX_GetEraseRun(void)    { return vrx.erase_run; }
+float   RX_GetLastSNR(void)     { return vrx.last_conf; }
+uint8_t RX_GetVGain(void)       { return PGA112_GetGain(); }
+uint8_t RX_GetDspSubState(void) { return vrx.state; }
+
 const char* RX_GetDisplayMessage(void)  { return rx_display_msg; }
 uint8_t     RX_GetDisplayLength(void)   { return rx_display_len; }
 uint8_t     RX_GetScrollLine(void)      { return rx_scroll_line; }

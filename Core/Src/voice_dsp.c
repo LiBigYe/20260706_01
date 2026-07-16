@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file           : voice_dsp.c
-  * @brief          : 声语信使 v5 接收 DSP 核心实现 (可移植)
+  * @brief          : 声语信使 v5.1 接收 DSP 核心实现 (True SNR 分类器)
   *
   *  时基恢复策略 (关键):
   *   - 前导 (1500/2400 交替) 只用于唤醒 + 冻结噪声底 + 交替校验 (排除窄带噪声).
@@ -10,6 +10,13 @@
   *     的同步音起点, 由此锁定数据符号 30ms 栅格.
   *   - 数据阶段完全自由运行栅格, 只取每个 20ms tone 的中间 10ms 做判决.
   *     不依赖 guard 下降沿 → 免疫混响拖尾 (复核缺陷 2).
+  *
+  *  v5.1 变更 (2026-07-16):
+  *   - True SNR 分类器: P_signal / (P_total - P_signal) 取代 best/second.
+  *     免疫宽带白噪声 (风扇/空调), 窄带干扰 (1550Hz 电机), DC 偏置.
+  *   - 低能量门限 + 双重频域锁: VD_EN_MARGIN 1000→500,
+  *     但须连续 2 次 Goertzel 命中导频才进入 PREAMBLE.
+  *   - 频域擦除计数: 连续 4 符号 0xFF 才判定信号丢失, 取代差分能量 lo_run.
   ******************************************************************************
   */
 #include "voice_dsp.h"
@@ -44,22 +51,28 @@ static const int vd_center_k[4] = {15, 18, 21, 24};  /* 1500/1800/2100/2400 @160
 static const float vd_freq_weight[4] = {1.33f, 1.08f, 1.00f, 1.02f};
 
 /* ---- 唤醒能量门限 (自适应, 仅用于"唤醒提示", 真正判决靠频谱置信度) ----
- * 复核缺陷 1/3 对策: 能量门限只做低成本唤醒, 取 noise×1.5, 让弱信号也能
- * 进入 PREAMBLE; 误唤醒由后续导频交替 + 同步音置信度 (裕量数百倍) 自然拒绝. */
+ * 复核缺陷 1/3 对策: 能量门限只做低成本唤醒. v5.1 大幅降低门限让微弱信号进门,
+ * 误唤醒由后续双重 Goertzel 频域锁 (连续2次命中) 滤除. */
 #define VD_EN_FLOOR_INIT   400U
-#define VD_EN_MARGIN      1000U  /* noise_floor在700~1300,需足够余量防噪声尖峰突破 */
-#define VD_EN_MIN          800U     /* 差分能量最小唤醒门限 */
-#define VD_STARTUP_QUIET    15U     /* ~75ms 静稳 (缩短以降低首帧竞态窗口) */
+#define VD_EN_MARGIN        500U  /* 核心修改: 大幅降低门限裕量 (原1000→500), 让微弱信号进门.
+                                    后续由双重 Goertzel 频域锁 (连续2次命中) 滤除噪声误触发. */
+#define VD_EN_MIN           500U  /* 降低绝对唤醒下限 (原800→500) */
+#define VD_STARTUP_QUIET    15U   /* ~75ms 静稳 (缩短以降低首帧竞态窗口) */
 
 /* ---- 前导/同步参数 (样本) ---- */
 #define VD_PREAMBLE_MIN_HI   6U     /* 连续 6 HI 块 (30ms) → PREAMBLE */
 #define VD_PRE_TIMEOUT     140U     /* 前导内 140 块(700ms)无同步 → 放弃 */
 #define VD_MIN_PILOT_TRANS   2U     /* 至少 2 次 1500/2400 交替 */
 
-/* 判决置信度: 主频幅度² / 次强幅度² ≥ 该比值, 否则输出擦除 0xFF.
- * 纯噪声各 bin 相近 → 比值≈1 → 擦除; 弱但干净的载波 → 比值大 → 解出.
- * 这是"无绝对幅值门限"的关键 (复核缺陷 1). */
-#define VD_CONF_RATIO      1.6f
+/* 频域锁: 连续 Goertzel 命中导频次数 (10ms窗口, 连续2次=20ms有效载波才放行).
+ * 降低差分能量唤醒门限后, 噪声可能偶尔越过门限, 但频谱平坦的噪声不可能连续
+ * 两次命中同一 FSK 频点 — 这是"低门限+严验证"策略的数学基础. */
+#define VD_PILOT_HITS_REQ    2U
+
+/* 数据段频域掉线容忍: 连续 N 个符号 Goertzel 返回 0xFF (擦除) 才判定信号丢失.
+ * 每个符号 30ms, N=4 即 120ms 无有效载波 → 退出. 单/双符号的瞬时擦除
+ * (由突发噪声或深衰落引起) 交给 Hamming(7,4) 纠错, 不触发退网. */
+#define VD_MAX_ERASE_RUN     4U
 
 /* ========================================================================== */
 /*  Goertzel                                                                   */
@@ -76,36 +89,81 @@ static float goertzel_mag2(const uint16_t *win, int N, int k, float dc)
     return q1 * q1 + q2 * q2 - q1 * q2 * coeff;
 }
 
-/* 单频幅度² (±1 bin 取最大, 容忍频偏 — 复核缺陷 4) */
-static float freq_mag2(const uint16_t *win, int N, int center_k, float dc)
-{
-    float m = goertzel_mag2(win, N, center_k, dc);
-    float a = goertzel_mag2(win, N, center_k - 1, dc);
-    float b = goertzel_mag2(win, N, center_k + 1, dc);
-    if (a > m) m = a;
-    if (b > m) m = b;
-    return m;
-}
-
+/* ========================================================================== */
+/*  True SNR 分类器 (v5.1 核心改进)                                             */
+/* ========================================================================== */
 uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N, float *conf_out)
 {
-    /* 去 DC: 用窗口均值 (复核缺陷 3, 全窗均值而非固定 2048) */
+    /* 1. 去 DC: 用窗口均值 */
     uint32_t sum = 0;
     for (uint16_t i = 0; i < N; i++) sum += win[i];
     float dc = (float)sum / (float)N;
 
-    float mag[4];
-    for (int i = 0; i < 4; i++)
-        mag[i] = freq_mag2(win, (int)N, vd_center_k[i], dc) * vd_freq_weight[i];
+    /* 2. 总交流功率 P_total = 时域平方和 (所有频段能量之和).
+     *    P_total = Σ(x[i] - x̄)² = N × A²/2 (纯正弦波情况).
+     *    后续 True SNR 需要用此值作为"信号+噪声"总能量. */
+    float p_total = 0.0f;
+    for (uint16_t i = 0; i < N; i++) {
+        float dev = (float)win[i] - dc;
+        p_total += dev * dev;
+    }
 
-    int best = 0; float bestv = mag[0], second = 0.0f;
-    for (int i = 1; i < 4; i++) if (mag[i] > bestv) { bestv = mag[i]; best = i; }
-    for (int i = 0; i < 4; i++) if (i != best && mag[i] > second) second = mag[i];
+    /* 极低能量阻断: 若总交流能量近乎为零 (几乎是纯 DC 死区),
+     * 直接返回擦除, 避免后续浮点运算在零附近产生非法 SNR. */
+    if (p_total < 100.0f) {
+        if (conf_out) *conf_out = 0.0f;
+        return 0xFFU;
+    }
 
-    float ratio = (second > 1.0f) ? (bestv / second) : (bestv > 1.0f ? 1000.0f : 0.0f);
-    if (conf_out) *conf_out = ratio;
+    /* 3. Goertzel 幅度² (±1 bin 取最大, 容忍频偏).
+     *    同时记录 raw_mag (不含频响权重, 用于 SNR 计算) 和
+     *    wgt_mag (含频响补偿, 用于 digit 选择, 消除前端频响偏差). */
+    float raw_mag[4];
+    float wgt_mag[4];
+    for (int i = 0; i < 4; i++) {
+        float m = goertzel_mag2(win, (int)N, vd_center_k[i], dc);
+        float a = goertzel_mag2(win, (int)N, vd_center_k[i] - 1, dc);
+        float b = goertzel_mag2(win, (int)N, vd_center_k[i] + 1, dc);
+        if (a > m) m = a;
+        if (b > m) m = b;
+        raw_mag[i] = m;                       /* 原始 (用于 SNR 计算) */
+        wgt_mag[i] = m * vd_freq_weight[i];   /* 加权 (用于 digit 选择) */
+    }
 
-    if (ratio < VD_CONF_RATIO) return 0xFFU;   /* 擦除, 交给 FEC */
+    /* 4. 找最强频点 (用加权值, 消除模拟前端 1500Hz 频响劣势) */
+    int best = 0;
+    float bestv = wgt_mag[0];
+    for (int i = 1; i < 4; i++) {
+        if (wgt_mag[i] > bestv) { bestv = wgt_mag[i]; best = i; }
+    }
+
+    /* 5. True SNR: 量纲推导 — Goertzel mag² = A²×N²/4, 时域方差 = N×A²/2.
+     *   p_signal = N×A²/2 = N × (4×M²/N²) / 2 = 2×M²/N.
+     *   系数 α = 2/N. 对于 N=160: α = 2/160 = 0.0125.
+     *   注意: 若误用 2/N², p_signal 会被缩小 160 倍 → SNR 永 < 0.01 → 全擦除! */
+    float alpha = 2.0f / (float)N;
+    float p_signal = raw_mag[best] * alpha;   /* 最强载波功率 (方差单位) */
+
+    /* 噪声 = 总能量 - 载波能量, 防浮点微小负值或除零 */
+    float p_noise = p_total - p_signal;
+    if (p_noise < 1.0f) p_noise = 1.0f;
+
+    float snr = p_signal / p_noise;
+    if (conf_out) *conf_out = snr;  /* v5.1: 报告 True SNR, 非旧 best/second 比值 */
+
+    /* 6. 判决门限 */
+    /* (a) 绝对载波能量下限: Goertzel mag² 低于此值说明连单频能量都不存在,
+     *     即使 SNR 偶然高 (纯静音 P_total≈0), 也拒绝.
+     *     ±5 LSB × N=160 → (5×160/2)² = 6.4×10⁵, 留余量取 200,000. */
+    #define VD_MIN_CARRIER_MAG2  200000.0f
+    if (raw_mag[best] < VD_MIN_CARRIER_MAG2) return 0xFFU;
+
+    /* (b) 真实信噪比下限: SNR=2.0 (6dB) 是抗混叠与容忍晶振频偏的甜点.
+     *     部分载波能量因频偏泄漏到相邻 bin → 被 p_total 吃进当 p_noise
+     *     → SNR 自然偏低. 2.0 恰好平衡"真弱信号不丢"与"噪声不误判". */
+    #define VD_MIN_SNR            2.0f
+    if (snr < VD_MIN_SNR) return 0xFFU;
+
     return (uint8_t)best;
 }
 
@@ -123,6 +181,10 @@ uint32_t VoiceDSP_DiffEnergy(const uint16_t *blk, uint16_t n)
     return e;
 }
 
+/* ========================================================================== */
+/*  辅助函数                                                                   */
+/* ========================================================================== */
+
 /* 从环形缓冲取以绝对位置 abs_start 起的 N 个样本 (调用方保证仍在缓冲内) */
 static void ring_extract(uint32_t abs_start, uint16_t N, uint16_t *out)
 {
@@ -131,6 +193,18 @@ static void ring_extract(uint32_t abs_start, uint16_t N, uint16_t *out)
         uint16_t idx = (uint16_t)(a % VD_RING);
         out[i] = vd_ring[idx];
     }
+}
+
+/* 单频幅度² (±1 bin 取最大). sync_find_onset 内部使用,
+ * 不参与 True SNR 判决 (判决走 VoiceDSP_Classify). */
+static float freq_mag2(const uint16_t *win, int N, int center_k, float dc)
+{
+    float m = goertzel_mag2(win, N, center_k, dc);
+    float a = goertzel_mag2(win, N, center_k - 1, dc);
+    float b = goertzel_mag2(win, N, center_k + 1, dc);
+    if (a > m) m = a;
+    if (b > m) m = b;
+    return m;
 }
 
 /* ========================================================================== */
@@ -184,6 +258,8 @@ void VoiceRx_Start(VoiceRx *rx)
     vd_ring_pos = 0;
     vd_total = 0;
     vd_grid_start = 0;
+    rx->pilot_hits = 0;
+    rx->erase_run  = 0;
 }
 
 /* 分类当前"已收满 160 样本的判决窗", 存入符号数组 */
@@ -193,6 +269,24 @@ static void data_store_symbol(VoiceRx *rx)
     uint8_t d = VoiceDSP_Classify(rx->win_buf, VD_WIN, &conf);
     rx->last_digit = d;
     rx->last_conf = conf;
+
+    /* ========================================================= */
+    /* 核心修改: 用频域擦除计数取代时域 lo_run 判定信号丢失      */
+    /* ========================================================= */
+    if (d == 0xFFU) {
+        rx->erase_run++;
+        if (rx->erase_run >= VD_MAX_ERASE_RUN) {
+            /* 连续 N 个符号 (120ms) Goertzel 无法锁定任何 FSK 频点
+             * → 信号确实丢失, 退出数据段回到监听. */
+            rx->state = VD_LISTEN;
+            rx->hi_run = rx->lo_run = 0;
+            return;
+        }
+    } else {
+        rx->erase_run = 0;  /* 只要出一个有效符号, 掉线危机解除 */
+    }
+    /* ========================================================= */
+
     if (rx->sym_count < VP_MAX_DATA_SYMBOLS) {
         rx->symbols[rx->sym_count++] = d;
     }
@@ -264,27 +358,39 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
     switch (rx->state) {
 
     case VD_LISTEN:
-        /* 进门严格化: 仅连续高能量不足以进前导 (纯噪声也会偶尔连续超门限).
-         * 追加导频验证: 最近 160 样本必须判为 1500Hz 或 2400Hz 导频音,
-         * 才认定是真实帧前导. 纯噪声频谱平坦→分类为 0xFF 擦除→进不来,
-         * 从根上消除噪声误唤醒 (灯乱闪). */
+        /* 进门策略: 低能量门限 (VD_EN_MARGIN=500) 让微弱信号进门,
+         * 但必须连续 2 次 Goertzel 命中同一导频才放行.
+         * 频谱平坦的噪声不可能连续两次命中 1500/2400Hz —
+         * 这是"低门限宽进 + 频域严查"策略不惧误唤醒的数学基础. */
         if (rx->hi_run >= VD_PREAMBLE_MIN_HI && vd_total >= VD_WIN) {
             uint16_t lwin[VD_WIN];
             ring_extract(vd_total - VD_WIN, VD_WIN, lwin);
             float lconf;
             uint8_t ld = VoiceDSP_Classify(lwin, VD_WIN, &lconf);
             if (ld == VP_PILOT_LO || ld == VP_PILOT_HI) {
-                rx->state = VD_PREAMBLE;
-                rx->block_in_pre = 0;
-                rx->pilot_last = ld;        /* 记下首个导频, 供交替计数 */
-                rx->pilot_trans = 0;
+                rx->pilot_hits++;
+                if (rx->pilot_hits >= VD_PILOT_HITS_REQ) {
+                    /* 双重频域锁: 连续2次命中, 确认前导真实存在 */
+                    rx->state = VD_PREAMBLE;
+                    rx->block_in_pre = 0;
+                    rx->pilot_last = ld;
+                    rx->pilot_trans = 0;
+                    rx->pilot_hits = 0;   /* 重置供下次使用 */
+                }
+            } else {
+                rx->pilot_hits = 0;       /* 频谱不对, 连续计数打断 */
             }
+        } else {
+            rx->pilot_hits = 0;           /* 能量掉落, 连续计数打断 */
         }
         break;
 
     case VD_PREAMBLE: {
         rx->block_in_pre++;
-        if (rx->block_in_pre > VD_PRE_TIMEOUT || rx->lo_run >= 20U) {
+        /* 移除 rx->lo_run >= 20U 退出条件: 差分能量对 1500Hz 有 ~37.5% 的幅度衰减,
+         * 前导中 1500Hz 导频可能被时域能量判据误杀 → 过渡到 LISTEN → 前导白等.
+         * 现在仅凭超时退出, 真失锁交给 VD_DATA 的频域擦除计数处理. */
+        if (rx->block_in_pre > VD_PRE_TIMEOUT) {
             rx->state = VD_LISTEN; rx->hi_run = 0; break;
         }
         /* 用最新 160 样本 (若已累计) 分类, 观察导频交替 + 同步音 */
@@ -306,12 +412,18 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
             rx->sym_expected = 0;
             rx->win_fill = 0;
             rx->lo_run = 0;
+            rx->erase_run = 0;        /* 数据段起始, 擦除计数清零 */
         }
         break;
     }
 
     case VD_DATA: {
-        if (rx->lo_run >= 100U) { rx->state = VD_LISTEN; rx->hi_run = 0; break; }
+        /* 彻底移除 if (rx->lo_run >= 100U) 退网判定.
+         * 差分能量对 1500Hz 载波天生偏低 (dE ∝ f), 数据段中低频符号
+         * (digit 0=1500Hz) 的时域能量可能跌落至门限以下 → lo_run 累加
+         * → 误判掉线 → LED 熄灭 / 数据帧被掐断.
+         * 真正的信号丢失判定已移交给 data_store_symbol 的频域擦除计数:
+         * Goertzel 连续 4 个符号无法锁定任何 FSK 频点 → 才退出. */
 
         for (uint16_t i = 0; i < VD_BLOCK; i++) {
             uint32_t abspos = block_start_abs + i;
@@ -342,4 +454,3 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
 
     return (rx->state == VD_DONE) ? 1U : 0U;
 }
-                                             

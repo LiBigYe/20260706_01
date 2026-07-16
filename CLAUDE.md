@@ -208,6 +208,41 @@ receiver.c / voice_fec.c / voice_dsp.c):
 接收端无需任何改动: 它在收到 `sym_expected` 个符号后已进入 DONE, 额外的 30ms 对
 接收端完全透明. 最坏 48 字符: 总帧长 11.58s + 0.35s ≈ 11.93s, 仍在 20s 预算内.
 
+### 2026-07-16 — v5.1 True SNR 分类器 + 频域抗噪重构
+
+针对接收端两大隐蔽缺陷进行 DSP 层 + 状态机层重构:
+
+**缺陷 1 — 差分能量对频率偏置导致弱信号漏检**: `VoiceDSP_DiffEnergy` 对 1500Hz
+载波只有 2400Hz 的 62.5% (dE ∝ A×f), 相同声学幅度下低频符号的时域能量天然更低,
+被 `VD_EN_MARGIN=1000` 挡在门外.
+
+**缺陷 2 — 时域能量误导信号丢失判定**: VD_PREAMBLE 的 `lo_run >= 20U` 和 VD_DATA
+的 `lo_run >= 100U` 在数据段 1500Hz 符号出现时误累加, 导致接收中途 LED 熄灭 →
+帧被掐断.
+
+**修改 1 — True SNR 分类器** (`voice_dsp.c` VoiceDSP_Classify):
+旧判据 `best/second ≥ 1.6` 在宽带噪声下四个 bin 同时抬高 → 比值偶然越过门限 →
+噪声误判为有效符号. 新判据 True SNR = P_signal / (P_total - P_signal):
+- P_total = Σ(x[i]-x̄)² (时域方差, 全频段能量)
+- P_signal = max Goertzel mag² × 2/N (最强载波, 换算到方差单位)
+- α = 2/N = 0.0125 (N=160, 整数 bin 精确对齐. 注意不是 2/N²!)
+- 门限: raw_mag² ≥ 200,000 且 SNR ≥ 2.0 (6dB)
+
+**修改 2 — 低能量门限 + 双重频域锁** (`voice_dsp.c`):
+VD_EN_MARGIN 1000→500, VD_EN_MIN 800→500 (弱信号放进门), 但进场后须连续
+2 次 Goertzel 命中同一导频 (1500/2400Hz) 才放行. 噪声频谱平坦 → 不可能连续命中.
+
+**修改 3 — 频域擦除计数替代 lo_run** (`voice_dsp.c`):
+移除 VD_PREAMBLE 的 `lo_run>=20U` 退出 (仅留 700ms 硬超时) 和 VD_DATA 的
+`lo_run>=100U` 退网. 改为 `data_store_symbol` 中连续 4 符号 Goertzel 返回 0xFF
+才判信号丢失. 瞬时擦除交给 Hamming(7,4) 纠错.
+
+**修改 4 — LiveWatch 诊断接口** (`receiver.c/h`):
+新增 RX_GetPilotHits/GetEraseRun/GetLastSNR/GetVGain/GetDspSubState 五个 getter.
+
+**修改文件**: voice_dsp.h (+pilot_hits/erase_run, +宏), voice_dsp.c (True SNR +
+双重锁 + 擦除计数), receiver.c/h (诊断接口).
+
 ### 待验证项
 - 半双工模式切换 (RX→TX→RX) 外设资源冲突检查
 - PA0 一键开关机 Standby 唤醒电流 ≤1mA
@@ -215,3 +250,5 @@ receiver.c / voice_fec.c / voice_dsp.c):
 - 突发模式 AGC: 远距离弱信号接收距离提升验证
 - 数据段增益冻结后符号擦除率是否显著下降
 - CRC 符号丢失率是否下降 (30ms 保护槽效果)
+- True SNR 对宽带噪声(风扇/空调)的免疫验证
+- 前导双重频域锁: 误唤醒率为零的验证
