@@ -11,8 +11,7 @@
   *
   *   时序 (16 kHz tick = 62.5us):  tone=320, guard=160, slot=480 ticks.
   *
-  *   v5.1 新增 ACK 模式: TX_SendAck() → 100ms 1500Hz 突发.
-  *
+   *
   *   由 TIM3 ISR (16kHz) 驱动: HAL_TIM_PeriodElapsedCallback → TX_Tick → PWM_DDS_Tick.
   ******************************************************************************
   */
@@ -29,7 +28,6 @@
 #define TICKS_PREAMBLE       ((VP_PREAMBLE_MS  * TICK_FREQ) / 1000)  /* 3200 */
 #define TICKS_POSTAMBLE      ((VP_POSTAMBLE_MS * TICK_FREQ) / 1000)  /* 1920 */
 #define TICKS_PILOT_PERIOD   ((VP_PILOT_PERIOD_MS * TICK_FREQ) / 1000) /* 640 */
-#define TICKS_ACK            1600U  /* 100ms @ 16kHz */
 
 /* 状态 */
 #define ST_IDLE       0
@@ -38,7 +36,6 @@
 #define ST_DATA       3
 #define ST_POSTAMBLE  4
 #define ST_DONE       5
-#define ST_ACK        6
 
 static uint8_t   tx_state;
 static uint32_t  tx_tick;
@@ -47,13 +44,12 @@ static uint16_t  tx_sym_idx;
 static uint16_t  tx_sym_count;
 static uint8_t   tx_pilot_phase;
 static uint8_t   tx_done_flag;
-static uint16_t  tx_ack_tick;
 static uint8_t   tx_symbols[VP_MAX_DATA_SYMBOLS];
 
 extern TIM_HandleTypeDef htim3;
 
-static const char *state_names[7] =
-    {"IDLE", "PREAMBLE", "SYNC", "DATA", "POSTAMBLE", "DONE", "ACK"};
+static const char *state_names[6] =
+    {"IDLE", "PREAMBLE", "SYNC", "DATA", "POSTAMBLE", "DONE"};
 
 static void tx_set_symbol(uint8_t digit) { PWM_DDS_SetFreq(digit); }
 static void tx_guard(void)               { PWM_DDS_OutputMidscale(); }
@@ -66,7 +62,6 @@ void TX_Init(void)
     tx_tick = 0; tx_slot_tick = 0;
     tx_sym_idx = 0; tx_sym_count = 0;
     tx_pilot_phase = 0; tx_done_flag = 0;
-    tx_ack_tick = 0;
 }
 
 void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
@@ -91,23 +86,8 @@ void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
     tx_set_symbol(VP_PILOT_LO);
 
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
     HAL_TIM_Base_Start_IT(&htim3);
-}
-
-/* ── v5.1 ACK 发送: 100ms 1500Hz 纯音 ── */
-void TX_SendAck(void)
-{
-    tx_ack_tick = 0;
-    tx_state = ST_ACK;
-    tx_done_flag = 0;
-    PWM_DDS_Start();
-    PWM_DDS_SetFreq(VP_PILOT_LO);
-    HAL_TIM_Base_Start_IT(&htim3);
-}
-
-uint8_t TX_IsAckDone(void)
-{
-    return (tx_state == ST_IDLE && tx_ack_tick >= TICKS_ACK) ? 1U : 0U;
 }
 
 void TX_Tick(void)
@@ -169,17 +149,6 @@ void TX_Tick(void)
         }
         break;
 
-    /* ── v5.1 ACK 突发 ── */
-    case ST_ACK:
-        if (tx_ack_tick >= TICKS_ACK) {
-            tx_state = ST_IDLE;
-            tx_done_flag = 0;
-            PWM_DDS_OutputMidscale();
-            HAL_TIM_Base_Stop_IT(&htim3);
-            return;
-        }
-        break;
-
     default:
         break;
     }
@@ -187,7 +156,6 @@ void TX_Tick(void)
     PWM_DDS_Tick();
     tx_tick++;
     tx_slot_tick++;
-    if (tx_state == ST_ACK) tx_ack_tick++;
 }
 
 uint8_t TX_IsBusy(void)
@@ -201,15 +169,15 @@ void TX_ClearDone(void)
 {
     tx_done_flag = 0;
     tx_state = ST_IDLE;
-    tx_ack_tick = 0;
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
     PWM_DDS_OutputMidscale();
     HAL_TIM_Base_Stop_IT(&htim3);
 }
 
 const char* TX_GetStateName(void)
 {
-    if (tx_state <= 6) return state_names[tx_state];
+    if (tx_state <= 5) return state_names[tx_state];
     return "?";
 }
 

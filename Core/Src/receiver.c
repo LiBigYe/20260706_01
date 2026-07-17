@@ -151,6 +151,7 @@ void RX_Start(void)
     PGA112_SetGain(PGA_GAIN_INIT_CODE);
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 }
 
 void RX_Stop(void)
@@ -195,10 +196,13 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
         uint8_t done = VoiceRx_PushBlock(&vrx, sub, PGA112_GetGain());
         rx_last_digit = vrx.last_digit;
         uint8_t now_data = (vrx.state == VD_DATA);
-        if (now_data && !was_data)
+        if (now_data && !was_data) {
             HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-        else if (!now_data && was_data)
+            HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+        } else if (!now_data && was_data) {
             HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+        }
         if (done) {
             rx_on_frame_done();
             return;
