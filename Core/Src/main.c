@@ -333,7 +333,7 @@ int main(void)
   /* 旧 PC13 指示灯不再参与收发状态，固定关闭。 */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 
-  /* PGA112 第二级可编程增益: 复位 + 设初始增益 8x (SPI2, CS=PB12) */
+  /* PGA112 第二级可编程增益: 退出关断并设初始增益 16x (SPI2, CS=PB12). */
   PGA112_Init();
 
   /* 冷启动延时: 等 OLED VDD 稳定 (手册要求 1-50ms) */
@@ -389,6 +389,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Execute deferred PGA writes outside the ADC DMA callbacks. */
+    PGA112_Service();
+
     if (g_power_off) {
         HAL_ADC_Stop_DMA(&hadc1);
         HAL_TIM_Base_Stop(&htim2);
@@ -988,7 +991,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;

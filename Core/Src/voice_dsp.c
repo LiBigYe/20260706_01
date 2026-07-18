@@ -49,7 +49,6 @@ static const float vd_freq_weight[4] = {1.33f, 1.08f, 1.00f, 1.02f};
 #define VD_STARTUP_QUIET    15U   /* ~75ms 静稳 */
 
 /* ---- 前导/同步参数 ---- */
-#define VD_PREAMBLE_MIN_HI   6U     /* 连续 6 HI 块 → PREAMBLE */
 #define VD_PRE_TIMEOUT     140U     /* 前导内 140 块(700ms) → 放弃 */
 #define VD_MIN_PILOT_TRANS   2U     /* 至少 2 次 1500/2400 交替 */
 #define VD_PILOT_HITS_REQ    2U     /* 频域锁: 连续命中次数 */
@@ -143,6 +142,8 @@ uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
 {
     /* 对 3 个重叠窗口各做 Goertzel, 累加每个频率的 mag² */
     float acc_mag2[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float p_total = 0.0f;
+    uint8_t window_count = 0U;
 
     for (uint8_t w = 0; w < VD_MULTI_WIN_COUNT; w++) {
         uint16_t offset = vd_multi_win_offsets[w];
@@ -154,6 +155,12 @@ uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
         uint32_t sum = 0;
         for (uint16_t i = 0; i < VD_WIN; i++) sum += sub[i];
         float dc = (float)sum / (float)VD_WIN;
+
+        for (uint16_t i = 0; i < VD_WIN; i++) {
+            float dev = (float)sub[i] - dc;
+            p_total += dev * dev;
+        }
+        window_count++;
 
         /* Goertzel 4 频 */
         for (int f = 0; f < 4; f++) {
@@ -181,23 +188,15 @@ uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
     }
 
     /* ── 绝对载波能量 ── */
-    if (acc_mag2[best] < 200000.0f * (float)VD_MULTI_WIN_COUNT) {
+    if (window_count == 0U ||
+        acc_mag2[best] < 200000.0f * (float)window_count) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
 
-    /* ── True SNR (用累加后的 mag²) ── */
+    /* The numerator and denominator must cover the same overlapping windows. */
     float alpha = 2.0f / (float)VD_WIN;
-    /* 近似: 用 tone 全长的 P_total 做归一化 */
-    uint32_t sum_total = 0;
-    for (uint16_t i = 0; i < tone_len; i++) sum_total += tone[i];
-    float dc_full = (float)sum_total / (float)tone_len;
-    float p_total = 0.0f;
-    for (uint16_t i = 0; i < tone_len; i++) {
-        float dev = (float)tone[i] - dc_full;
-        p_total += dev * dev;
-    }
-    if (p_total < 100.0f * (float)VD_MULTI_WIN_COUNT) {
+    if (p_total < 100.0f * (float)window_count) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
@@ -348,7 +347,7 @@ static void data_store_symbol(VoiceRx *rx)
 /* ========================================================================== */
 /*  主入口: 送入 80-sample 块, 推进状态机                                     */
 /* ========================================================================== */
-uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
+uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
 {
     uint32_t block_start_abs = vd_total;
 
@@ -357,10 +356,9 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code)
         vd_total++;
     }
 
-    /* 差分能量, 增益归一化 */
+    /* 差分能量。AGC 在数据段前冻结，数据判决不依赖增益码。 */
     uint32_t energy_raw = VoiceDSP_DiffEnergy(blk, VD_BLOCK);
-    uint32_t energy_norm = energy_raw;  /* raw ADC scale, thresholds calibrated accordingly */
-    (void)gain_code;  /* gain normalization not needed: freeze strategy ensures stable gain */
+    uint32_t energy_norm = energy_raw;
 
     uint32_t thr = (rx->noise_floor > 0U ? rx->noise_floor : VD_EN_FLOOR_INIT)
                    + VD_EN_MARGIN;

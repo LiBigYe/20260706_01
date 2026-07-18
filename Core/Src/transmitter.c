@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file           : transmitter.c
-  * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音 + ACK)
+ * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音)
   *
   *   帧结构 (与接收端 voice_dsp/voice_fec 严格对应):
   *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 — 唤醒/导频
@@ -143,6 +143,7 @@ void TX_Tick(void)
         if (tx_tick >= TICKS_POSTAMBLE) {
             tx_state = ST_DONE;
             tx_done_flag = 1;
+            HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
             PWM_DDS_OutputMidscale();
             PWM_DDS_Tick();
             return;

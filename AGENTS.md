@@ -1,5 +1,5 @@
 # AGENTS.md — 声语信使 半双工 (项目03) 代码实际描述
-# 最后更新: 2026-07-16
+# 最后更新: 2026-07-18
 # 原则: 以代码为准, 本文档必须在每次代码变更后同步更新
 
 # 项目03 — 半双工 (Half-Duplex)
@@ -31,8 +31,8 @@
 | OLED SCL | PB6 | AF4 OD | I2C1 400kHz |
 | OLED SDA | PB7 | AF4 OD | I2C1 400kHz |
 | LED (PC13) | PC13 | Output PP | 收发状态指示 |
-| LEDG (绿) | PB2 | Output PP | 上电灭, 仅关机置低 |
-| LEDR (红) | PB10 | Output PP | 上电灭, 仅关机置低 |
+| LEDG (绿) | PB2 | Output PP | 外部下拉, 高电平点亮; 仅发送期间亮 |
+| LEDR (红) | PB10 | Output PP | 外部下拉, 高电平点亮; 仅数据解码期间亮 |
 | POWER_BUTTON | PB1 | Input PU + EXTI1 | 独立电源键 (下降沿) |
 | POWER_CTRL | PB8 | Output PP | 电源锁存输出 |
 | F_CS | PA4 | Output PP | PY25Q64 SPI Flash 片选 |
@@ -40,7 +40,7 @@
 
 ## 源文件结构
 
-**活跃源文件 (12个, CMakeLists.txt 中编译)**:
+**活跃业务源文件 (13个, CMakeLists.txt 中编译；`main.c` 由 CubeMX 子项目加入)**:
 
 | 文件 | 说明 |
 |------|------|
@@ -103,7 +103,7 @@
 ## v5.1 协议帧结构
 
 ```
-[Preamble 200ms: 1500/2400Hz 每40ms交替] [SYNC 30ms: 1800Hz单音]
+[Preamble 200ms: 1500/2400Hz 每40ms交替] [SYNC 30ms: 1800Hz 20ms + DC保护10ms]
 [LEN ×3 冗余] [Payload + CRC8: Hamming(7,4)+交织]
 [DC保护槽 30ms] [Postamble 120ms: 2400Hz]
 ```
@@ -159,12 +159,17 @@
 ## PGA112 第二级可编程增益
 
 - SPI2: PB12=CS, PB13=SCK, PB15=MOSI (Simplex_Bidirectional_Master, Mode0/MSB/8bit)
-- **当前初始增益: 32x** (PGA_GAIN_INIT_CODE = 5)
+- **当前初始增益: 16x** (PGA_GAIN_INIT_CODE = 4)
 - 增益档 0..7 = 1/2/4/8/16/32/64/128 倍
+- PGA112 命令为 16bit: 写增益 `0x2A, (gain_code << 4)`, 退出软件关断 `0xC2, 0x00`。
+- 增益写入分两步: DMA 回调中仅 `PGA112_RequestGain()`，主循环中的 `PGA112_Service()` 再执行 SPI 轮询，避免 SPI 超时阻塞采样处理。
+- `PGA112_SetGain()` / `PGA112_Init()` 返回 HAL 状态；`PGA112_GetLastStatus()` 与 `PGA112_GetErrorCount()` 供诊断。SPI 失败的异步请求以 10ms 间隔重试。PGA112 未接 MISO，`HAL_OK` 只能证明 STM32 SPI 已发送，不能证明芯片物理接收。
+- AGC 以 ADC 峰峰值控制，目标死区为 1120..2234 counts（约 0.9..1.8Vpp，VDDA=3.3V 时）。同一 5ms 块内至少 3 个近轨采样才触发即时降档。
 - AGC 调度策略 (receiver.c `RX_ProcessHalfBuffer`):
-  - **VD_LISTEN**: 锁死在 32x, 不调用 AGC (防止待机巨响致聋)
-  - **VD_PREAMBLE 前期** (pilot_trans < 2): AGC 活跃, 允许升至 128x. pilot_trans≥2 后提前冻结, 确保 1800Hz SYNC 同步音有绝对干净的物理波形
-  - **VD_DATA**: 绝对冻结增益, 禁止任何 PGA 寄存器写入 (保护 Goertzel 频谱完整性)
+  - **VD_LISTEN 静默**: 保持 16x；退出前导后恢复初始增益并清空 AGC 计数器。
+  - **VD_LISTEN 候选信号**: 连续 6 个高能量块后，仅允许上调至 64x，帮助弱导频通过频域锁，避免静态底噪爬升。
+  - **VD_PREAMBLE**: 前 4 次导频交替内闭环调节，可在 16x..128x 间升降；之后冻结，给同步音保留约 40ms 稳定时间。
+  - **VD_DATA**: 取消未执行的前导写请求并冻结增益，保证数据段 Goertzel 窗内没有增益阶跃。
 
 ## v5.1 DSP 核心 (voice_dsp.c)
 
@@ -176,14 +181,16 @@
   - 频响补偿权重: {1.33, 1.08, 1.00, 1.02} (消除模拟前端通带不平坦)
 - **双重频域锁**: 差分能量门限 500, 进门后连续 2 次 Goertzel 命中同一导频 (1500/2400Hz) 才进 PREAMBLE
 - **频域擦除计数**: 连续 4 符号 Goertzel 返回 0xFF 才判定信号丢失 (替换 lo_run)
-- **LiveWatch 诊断接口**: `RX_GetPilotHits/GetEraseRun/GetLastSNR/GetVGain/GetDspSubState`
+- **LiveWatch 诊断接口**: `RX_GetPilotHits/GetEraseRun/GetLastSNR/GetVGain/GetAGCVpp/GetPGAErrorCount/GetDspSubState`；`RX_GetLastSNR()` 返回线性值而非 dB。
+- 多窗口数据 SNR 的信号能量与总能量均按相同的三个重叠 160-sample 窗累加，避免分子和分母标尺不一致。
+- 软判决 LLR 使用归一化尾数 LUT + `ln(2)` 倍频，覆盖 1:1 到 100:1；4-FSK 的 LLR 位序与 MSB/LSB 硬判位序一致。
 
 ## 开机流程
 
 1. 寄存器级早期锁存 PB1 (电源键) + PB8 (电源锁存) → 防 BOR 重启竞态
 2. HAL_Init → SystemClock_Config (HSE 25MHz → PLL 50MHz, CSS 使能) → MX_*_Init
 3. POWER_CTRL 置高锁存电源, LED 全部灭
-4. PGA112_Init (SPI2, 初始 32x)
+4. PGA112_Init (SPI2, 初始 16x)
 5. OLED 启动画面 2s
 6. 等待电源键松手 + 50ms 防抖
 7. **SelectDeviceId()** — 按 1~9 选择设备编号, 发送确认, 删除清除
@@ -202,18 +209,19 @@
 | 2026-07-14 | v5 收发协同重构 (变长帧+FEC+同步音) + PGA112 初始 32x + 进门严格化 |
 | 2026-07-15 | 状态驱动冻结式 AGC + 帧尾 30ms DC 保护槽 |
 | 2026-07-16 | v5.1 True SNR 分类器 + 频域抗噪重构 (当前版本) |
+| 2026-07-18 | PGA112 AGC 重构: 候选弱信号获取、统一 Vpp 死区、三采样削顶判定、DMA 回调外 SPI 服务与错误诊断；修正 16x 初始档、SDN_DIS 命令、CRC 完成门控、LED 结束时机、多窗口 SNR 标尺与软判决 LLR 位序/LUT。 |
 
 ## 待验证项
 
 - 半双工模式切换 (RX→TX→RX) 外设资源冲突检查
 - PA0 一键开关机 Standby 唤醒电流 ≤1mA
 - 端到端收发测试 (两板对调)
-- 突发模式 AGC: 远距离弱信号接收距离提升验证
+- 突发模式 AGC: 验证候选增益最多升至64x、前导闭环目标 1120..2234 counts、数据段无增益写入
 - 数据段增益冻结后符号擦除率是否显著下降
 - CRC 符号丢失率是否下降 (30ms 保护槽效果)
 - True SNR 对宽带噪声(风扇/空调)的免疫验证
 - 前导双重频域锁: 误唤醒率为零的验证
-- PGA112 32x 初始增益实机验证
+- PGA112 16x 初始增益与 SPI 错误计数实机验证
 - PY25Q64 SPI Flash 读写稳定性验证
 
 ## 与旧版文档的差异速查
@@ -227,7 +235,7 @@
 | v4 固定 192 符号 + XOR | **v5.1** 变长帧 + Hamming(7,4) + CRC-8 + 同步音 |
 | "rx" + KEY_RIGHT 切回收信 | KEY_RIGHT 光标在末尾直接切回 |
 | HAL_PWR_EnableWakeUpPin 已添加 | **不存在** (代码中无此调用) |
-| PGA112 初始增益 8x | **32x** |
+| PGA112 初始增益 8x | **16x** |
 | RC 22nF | pwm_dds.c 注释 47nF/100nF |
 | 仅 PC13 LED | PC13 + PB2(LEDG) + PB10(LEDR) |
 | DEVICE_ID 编译宏 | 开机动态选择 |

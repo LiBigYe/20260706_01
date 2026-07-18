@@ -55,8 +55,8 @@ uint8_t  VoiceFEC_ParseDataSymbols(const uint8_t *syms, uint16_t sym_count,
   * @retval LLR = sign × ln(max(E1,E0)/min(E1,E0)), 范围约 ±4.6
   *
   *  4-FSK digit → bits 映射: 0→00, 1→01, 2→10, 3→11
-  *  bit0: E1=mag[1]+mag[3], E0=mag[0]+mag[2]
-  *  bit1: E1=mag[2]+mag[3], E0=mag[0]+mag[1]
+ *  MSB: E1=mag[2]+mag[3], E0=mag[0]+mag[1]
+ *  LSB: E1=mag[1]+mag[3], E0=mag[0]+mag[2]
   */
 float VoiceFEC_ComputeLLR(float E1, float E0);
 

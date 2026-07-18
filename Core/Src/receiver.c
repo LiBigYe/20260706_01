@@ -94,8 +94,20 @@ static void rx_sync_state(void)
 /* ========================================================================== */
 static void rx_on_frame_done(void)
 {
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+
+    if (!vrx.crc_ok) {
+        VoiceRx_Start(&vrx);
+        rx_sync_state();
+        return;
+    }
+
     /* payload = [src, mask_lo, mask_hi, text...] */
-    if (vrx.payload_len < VP_HEADER_BYTES) { VoiceRx_Start(&vrx); return; }
+    if (vrx.payload_len < VP_HEADER_BYTES) {
+        VoiceRx_Start(&vrx);
+        rx_sync_state();
+        return;
+    }
 
     rx_source_id   = vrx.payload[0];
     rx_target_mask = (uint16_t)vrx.payload[1] | ((uint16_t)vrx.payload[2] << 8);
@@ -147,7 +159,8 @@ void RX_Start(void)
     memset(rx_message, 0, sizeof(rx_message));
     rx_msg_length = 0; rx_source_id = 0; rx_target_mask = 0;
     rx_sync_state();
-    /* 回到 LISTENING: 强制设初始增益 (PGA_GAIN_INIT_CODE) */
+    PGA112_CancelPending();
+    PGA112_AGC_Reset();
     PGA112_SetGain(PGA_GAIN_INIT_CODE);
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
@@ -158,6 +171,9 @@ void RX_Stop(void)
 {
     rx_state = RX_STATE_IDLE;
     rx_done_flag = 0;
+    PGA112_CancelPending();
+    PGA112_AGC_Reset();
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 }
 
 void RX_ProcessHalfBuffer(const uint16_t *buf)
@@ -167,35 +183,33 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
         const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
 
-        /* ========================================================= */
-        /* 状态驱动的冻结式 AGC 调度策略 (v5.1 Early-Freeze)          */
-        /* ========================================================= */
-        if (vrx.state == VD_LISTEN) {
-            /* 待机态: 实时保持在初始增益 (PGA_GAIN_INIT_CODE), 防止突发巨响降增益后无法恢复 */
-            if (PGA112_GetGain() != PGA_GAIN_INIT_CODE) {
-                PGA112_SetGain(PGA_GAIN_INIT_CODE);
-                PGA112_AGC_Reset();
-            }
-        } else if (vrx.state == VD_PREAMBLE && vrx.pilot_trans < 2U) {
-            /* 前导前期 (pilot_trans < 2 = 前 ~80ms): AGC 活跃, 允许飙升至 128x.
-             * pilot_trans >= 2 后提前冻结: 此时 AGC 已收敛 80ms (16 轮 Update),
-             * 提前锁定增益, 为即将到来的 1800Hz SYNC 同步音精定时锚点
-             * 确保绝对干净的物理波形 — 零增益跳变瞬态噪声 — 防止 SYNC
-             * 检测窗的 True SNR 被阶跃能量污染 → 锚点丢失 → 整帧报废. */
-            PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, 1U);
-        }
-        /* 前导后期 (pilot_trans >= 2) 及数据态 (VD_DATA):
-           绝对冻结增益, 禁止任何 PGA 寄存器写入.
-           FSK 是频率调制 → 偶发的 ADC 削顶 (方波化) 不会破坏过零点
-           频率信息, Goertzel 基波提取不受影响 (限幅器效应).
-           但增益跳变引入的 AM 包络调制会立刻引发频谱泄露. */
-        /* ========================================================= */
-
-        /* 将子块推入 DSP, 传入当前真实的物理增益码供能量归一化使用 */
+        /* First update DSP state, then make an AGC decision for this block. */
         uint8_t was_data = (vrx.state == VD_DATA);
-        uint8_t done = VoiceRx_PushBlock(&vrx, sub, PGA112_GetGain());
+        uint8_t done = VoiceRx_PushBlock(&vrx, sub);
         rx_last_digit = vrx.last_digit;
         uint8_t now_data = (vrx.state == VD_DATA);
+
+        if (now_data) {
+            /* A queued preamble adjustment must never take effect in DATA. */
+            PGA112_CancelPending();
+            PGA112_AGC_Reset();
+        } else if (vrx.state == VD_PREAMBLE) {
+            if (vrx.pilot_trans < VD_AGC_FREEZE_TRANS) {
+                PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_LOCKED);
+            } else {
+                PGA112_CancelPending();
+                PGA112_AGC_Reset();
+            }
+        } else if (vrx.state == VD_LISTEN &&
+                   vrx.hi_run >= VD_PREAMBLE_MIN_HI) {
+            /* Candidate energy is enough to pursue, but not yet a validated frame. */
+            PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_ACQUIRE);
+        } else if (vrx.state == VD_LISTEN) {
+            if (PGA112_RequestGain(PGA_GAIN_INIT_CODE)) {
+                PGA112_AGC_Reset();
+            }
+        }
+
         if (now_data && !was_data) {
             HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
@@ -258,6 +272,8 @@ uint8_t RX_GetPilotHits(void)   { return vrx.pilot_hits; }
 uint8_t RX_GetEraseRun(void)    { return vrx.erase_run; }
 float   RX_GetLastSNR(void)     { return vrx.last_conf; }
 uint8_t RX_GetVGain(void)       { return PGA112_GetGain(); }
+uint16_t RX_GetAGCVpp(void)     { return PGA112_GetLastVpp(); }
+uint32_t RX_GetPGAErrorCount(void) { return PGA112_GetErrorCount(); }
 uint8_t RX_GetDspSubState(void) { return vrx.state; }
 
 const char* RX_GetDisplayMessage(void)  { return rx_display_msg; }

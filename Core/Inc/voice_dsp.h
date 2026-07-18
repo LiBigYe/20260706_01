@@ -8,7 +8,7 @@
   *
   *  v5.1 关键改进 (2026-07-16):
   *   (a) 多窗口 Goertzel: 取满 20ms tone (320 samples), 做 3 个重叠窗
-  *       (offset 40/80/120, N=160), 累加 mag² 以平滑白噪声 → ~4.8dB SNR 增益.
+ *       (offset 40/80/120, N=160), 累加 mag² 以平滑判决统计量.
   *   (b) 自适应 SNR 门限: 前导段累加 SNR 取均值, 数据段门限 =
   *       max(VD_SNR_MIN, preamble_mean_snr * 0.5). 强信号从严, 弱信号从宽.
   *   (c) 软判决输出: 每符号的 4 频 mag² 存入 sym_mag2[][] 供 voice_fec 做
@@ -49,6 +49,9 @@ extern "C" {
 #define VD_PREAMBLE   1U
 #define VD_DATA       2U
 #define VD_DONE       3U
+
+#define VD_PREAMBLE_MIN_HI   6U
+#define VD_AGC_FREEZE_TRANS  4U
 
 /* ── v5.1 自适应 SNR ── */
 #define VD_SNR_MIN         2.0f   /* 绝对 SNR 下限 (6dB) */
@@ -122,7 +125,7 @@ void     VoiceRx_Init(VoiceRx *rx);
 void     VoiceRx_Start(VoiceRx *rx);
 /* 送入一个 80-sample 块, 推进状态机. 返回 1 表示本块后 state==VD_DONE.
  * v5.1: 符号判决同时写入 rx->sym_mag2[][] 供软判决 FEC. */
-uint8_t  VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk, uint8_t gain_code);
+uint8_t  VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk);
 
 #ifdef __cplusplus
 }
