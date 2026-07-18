@@ -88,13 +88,31 @@ static void rx_sync_state(void)
     }
 }
 
+static void rx_restart_listening(void)
+{
+    VoiceRx_Start(&vrx);
+    rx_sync_state();
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+}
+
 /* ========================================================================== */
 /*  内部 — 帧完成处理 (地址过滤 + 填充显示缓冲)                                  */
 /* ========================================================================== */
 static void rx_on_frame_done(void)
 {
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+
+    if (!vrx.crc_ok) {
+        rx_restart_listening();
+        return;
+    }
+
     /* payload = [src, mask_lo, mask_hi, text...] */
-    if (vrx.payload_len < VP_HEADER_BYTES) { VoiceRx_Start(&vrx); return; }
+    if (vrx.payload_len < VP_HEADER_BYTES) {
+        rx_restart_listening();
+        return;
+    }
 
     rx_source_id   = vrx.payload[0];
     rx_target_mask = (uint16_t)vrx.payload[1] | ((uint16_t)vrx.payload[2] << 8);
@@ -118,8 +136,7 @@ static void rx_on_frame_done(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
     } else {
         /* 非本机 → 丢弃, 重新监听 */
-        VoiceRx_Start(&vrx);
-        rx_sync_state();
+        rx_restart_listening();
     }
 }
 
@@ -148,36 +165,41 @@ void RX_Start(void)
     rx_sync_state();
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 }
 
 void RX_Stop(void)
 {
     rx_state = RX_STATE_IDLE;
     rx_done_flag = 0;
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 }
 
 void RX_ProcessHalfBuffer(const uint16_t *buf)
 {
     if (rx_state == RX_STATE_IDLE || rx_state == RX_STATE_DONE) return;
 
-    uint8_t led_frame_was = (vrx.state == VD_PREAMBLE || vrx.state == VD_DATA);
-
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
-        uint8_t done = VoiceRx_PushBlock(&vrx, buf + (uint16_t)i * RX_ENV_BLOCK_SIZE);
+        const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
+
+        uint8_t was_data = (vrx.state == VD_DATA);
+        uint8_t done = VoiceRx_PushBlock(&vrx, sub);
         rx_last_digit = vrx.last_digit;
+        uint8_t now_data = (vrx.state == VD_DATA);
+
+        if (now_data && !was_data) {
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+        } else if (!now_data && was_data) {
+            HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+            HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+        }
         if (done) {
             rx_on_frame_done();
             return;
         }
     }
     rx_sync_state();
-
-    /* LED: 进入前导/数据点亮; 退回监听熄灭 */
-    uint8_t led_frame_now = (vrx.state == VD_PREAMBLE || vrx.state == VD_DATA);
-    if (led_frame_now && !led_frame_was)
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-    else if (!led_frame_now && led_frame_was)
-        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 }
 
 uint8_t RX_IsBusy(void)
@@ -222,6 +244,12 @@ void RX_GetLastSymbol(uint8_t *digit, float *mag)
     if (mag) { for (uint8_t i = 0; i < 4; i++) mag[i] = rx_last_mag[i]; }
 }
 
+/* ---- v5.1 诊断 getter (供 LiveWatch 实时监控) ---- */
+uint8_t RX_GetPilotHits(void)   { return vrx.pilot_hits; }
+uint8_t RX_GetEraseRun(void)    { return vrx.erase_run; }
+float   RX_GetLastSNR(void)     { return vrx.last_conf; }
+uint8_t RX_GetDspSubState(void) { return vrx.state; }
+
 const char* RX_GetDisplayMessage(void)  { return rx_display_msg; }
 uint8_t     RX_GetDisplayLength(void)   { return rx_display_len; }
 uint8_t     RX_GetScrollLine(void)      { return rx_scroll_line; }
@@ -252,4 +280,3 @@ const char* RX_GetStatusString(void)
     if (rx_state == RX_STATE_DONE) return "Rx Complete";
     return "Stand By";
 }
-

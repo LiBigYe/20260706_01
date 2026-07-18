@@ -119,6 +119,12 @@ uint8_t     RX_GetDisplaySourceId(void);
 
 void      RX_GetLastSymbol(uint8_t *digit, float *mag);
 
+/* ---- v5.1 诊断 getter (供 LiveWatch 实时监控) ---- */
+uint8_t  RX_GetPilotHits(void);   /* 前导命中计数 (0..VD_PILOT_HITS_REQ) */
+uint8_t  RX_GetEraseRun(void);    /* 数据段连续擦除计数 (0..VD_MAX_ERASE_RUN, saturates) */
+float    RX_GetLastSNR(void);     /* 最近一个符号的线性 True SNR */
+uint8_t  RX_GetDspSubState(void); /* voice_dsp 内部子状态: 0.LISTEN 1.PRE 2.DATA 3.DONE */
+
 const char* RX_GetDisplayMessage(void);
 uint8_t     RX_GetDisplayLength(void);
 uint8_t     RX_GetScrollLine(void);

@@ -1,20 +1,18 @@
 /**
   ******************************************************************************
   * @file           : transmitter.c
-  * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音)
+ * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音)
   *
   *   帧结构 (与接收端 voice_dsp/voice_fec 严格对应):
-  *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 (无 guard) — 唤醒/导频
+  *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 — 唤醒/导频
   *     SYNC      : 1800Hz 20ms 单音 + 10ms guard — 唯一精定时锚点
-  *     DATA      : 变长, 每符号 20ms tone + 10ms guard (1.65V DC)
-  *                 符号 = VoiceFEC_BuildDataSymbols(payload) 的输出
-  *                 payload = [source_id, mask_lo, mask_hi, text...] (变长)
+  *     DATA      : 变长, 每符号 20ms tone + 10ms guard
   *     POSTAMBLE : 120ms 2400Hz 连续音
   *
   *   时序 (16 kHz tick = 62.5us):  tone=320, guard=160, slot=480 ticks.
   *
+   *
   *   由 TIM3 ISR (16kHz) 驱动: HAL_TIM_PeriodElapsedCallback → TX_Tick → PWM_DDS_Tick.
-  *   公开 API 与旧版一致 (TX_Init/Start/Tick/IsBusy/IsDone/ClearDone), main.c 不变.
   ******************************************************************************
   */
 #include "transmitter.h"
@@ -40,10 +38,10 @@
 #define ST_DONE       5
 
 static uint8_t   tx_state;
-static uint32_t  tx_tick;         /* 阶段内 tick */
-static uint16_t  tx_slot_tick;    /* 当前符号槽内 tick 0..479 */
-static uint16_t  tx_sym_idx;      /* 数据符号索引 */
-static uint16_t  tx_sym_count;    /* 数据符号总数 */
+static uint32_t  tx_tick;
+static uint16_t  tx_slot_tick;
+static uint16_t  tx_sym_idx;
+static uint16_t  tx_sym_count;
 static uint8_t   tx_pilot_phase;
 static uint8_t   tx_done_flag;
 static uint8_t   tx_symbols[VP_MAX_DATA_SYMBOLS];
@@ -56,6 +54,8 @@ static const char *state_names[6] =
 static void tx_set_symbol(uint8_t digit) { PWM_DDS_SetFreq(digit); }
 static void tx_guard(void)               { PWM_DDS_OutputMidscale(); }
 
+/* ── 公开 API (main.c 不变) ── */
+
 void TX_Init(void)
 {
     tx_state = ST_IDLE;
@@ -66,7 +66,6 @@ void TX_Init(void)
 
 void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
 {
-    /* 组装 payload = [src, mask_lo, mask_hi, text...] (变长, 不填充) */
     if (source_id < NET_MIN_DEVICE_ID || source_id > NET_MAX_DEVICE_ID)
         source_id = NET_MIN_DEVICE_ID;
     target_mask &= NET_VALID_TARGET_MASK;
@@ -87,6 +86,7 @@ void TX_Start(const char *text, uint8_t source_id, uint16_t target_mask)
     tx_set_symbol(VP_PILOT_LO);
 
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
     HAL_TIM_Base_Start_IT(&htim3);
 }
 
@@ -104,7 +104,7 @@ void TX_Tick(void)
         if (tx_tick >= TICKS_PREAMBLE) {
             tx_state = ST_SYNC;
             tx_slot_tick = 0;
-            tx_set_symbol(VP_SYNC_DIGIT);   /* 1800Hz 同步音 */
+            tx_set_symbol(VP_SYNC_DIGIT);
         }
         break;
 
@@ -128,7 +128,7 @@ void TX_Tick(void)
             if (tx_sym_idx >= tx_sym_count) {
                 tx_state = ST_POSTAMBLE;
                 tx_tick = 0;
-                tx_set_symbol(VP_PILOT_HI);   /* 2400Hz 结束音 */
+                tx_set_symbol(VP_PILOT_HI);
             } else {
                 tx_set_symbol(tx_symbols[tx_sym_idx]);
             }
@@ -139,10 +139,14 @@ void TX_Tick(void)
         if (tx_tick >= TICKS_POSTAMBLE) {
             tx_state = ST_DONE;
             tx_done_flag = 1;
+            HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
             PWM_DDS_OutputMidscale();
             PWM_DDS_Tick();
             return;
         }
+        break;
+
+    default:
         break;
     }
 
@@ -163,6 +167,7 @@ void TX_ClearDone(void)
     tx_done_flag = 0;
     tx_state = ST_IDLE;
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
     PWM_DDS_OutputMidscale();
     HAL_TIM_Base_Stop_IT(&htim3);
 }
