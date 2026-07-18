@@ -1242,19 +1242,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(POWER_BUTTON_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LEDG_Pin LEDR_Pin POWER_CTRL_Pin */
-  GPIO_InitStruct.Pin = LEDG_Pin|LEDR_Pin|POWER_CTRL_Pin;
+  /*Configure GPIO pins : LEDG_Pin LEDR_Pin PG112_CS_Pin POWER_CTRL_Pin */
+  GPIO_InitStruct.Pin = LEDG_Pin|LEDR_Pin|PG112_CS_Pin|POWER_CTRL_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PG112_CS_Pin */
-  GPIO_InitStruct.Pin = PG112_CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(PG112_CS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : KB_COL0_Pin KB_COL1_Pin KB_COL2_Pin KB_COL3_Pin */
   GPIO_InitStruct.Pin = KB_COL0_Pin|KB_COL1_Pin|KB_COL2_Pin|KB_COL3_Pin;
