@@ -20,7 +20,7 @@ extern "C" {
 
 #define PGA_GAIN_MIN_CODE  0U
 #define PGA_GAIN_MAX_CODE  7U
-#define PGA_GAIN_INIT_CODE PGA_GAIN_32X
+#define PGA_GAIN_INIT_CODE 4U  /* 16x */
 
 #define AGC_RMS_HIGH         550U
 #define AGC_RMS_LOW          250U

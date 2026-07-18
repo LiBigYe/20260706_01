@@ -7,20 +7,28 @@ volatile uint8_t  g_pga_gain_live = PGA_GAIN_INIT_CODE;
 static uint16_t agc_hi_hold = 0U;
 static uint16_t agc_lo_hold = 0U;
 
-static void pga_write2(uint8_t b0, uint8_t b1)
+static HAL_StatusTypeDef pga_write2(uint8_t b0, uint8_t b1)
 {
     uint8_t tx[2] = { b0, b1 };
+    HAL_StatusTypeDef status;
+    
     HAL_GPIO_WritePin(PG112_CS_GPIO_Port, PG112_CS_Pin, GPIO_PIN_RESET);
-    (void)HAL_SPI_Transmit(&hspi2, tx, 2, 1U);
+    status = HAL_SPI_Transmit(&hspi2, tx, 2, 5U); 
     HAL_GPIO_WritePin(PG112_CS_GPIO_Port, PG112_CS_Pin, GPIO_PIN_SET);
+    
+    return status;
 }
 
 void PGA112_SetGain(uint8_t gain_code)
 {
     if (gain_code > PGA_GAIN_MAX_CODE) gain_code = PGA_GAIN_MAX_CODE;
-    g_pga_gain_live = gain_code;
+    
     uint8_t data = (uint8_t)((gain_code << 4) | (PGA_CHANNEL & 0x0FU));
-    pga_write2(PGA_CMD_WRITE, data);
+    
+    /* Only update live memory when SPI actually succeeds */
+    if (pga_write2(PGA_CMD_WRITE, data) == HAL_OK) {
+        g_pga_gain_live = gain_code;
+    }
 }
 
 uint8_t PGA112_GetGain(void) { return g_pga_gain_live; }

@@ -147,7 +147,7 @@ void RX_Start(void)
     memset(rx_message, 0, sizeof(rx_message));
     rx_msg_length = 0; rx_source_id = 0; rx_target_mask = 0;
     rx_sync_state();
-    /* 回到 LISTENING: 强制设 64x 增益 */
+    /* 回到 LISTENING: 强制设初始增益 (PGA_GAIN_INIT_CODE) */
     PGA112_SetGain(PGA_GAIN_INIT_CODE);
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
@@ -171,7 +171,7 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
         /* 状态驱动的冻结式 AGC 调度策略 (v5.1 Early-Freeze)          */
         /* ========================================================= */
         if (vrx.state == VD_LISTEN) {
-            /* 待机态: 死锁在 32x, 防止突发巨响降增益后无法恢复 (致聋) */
+            /* 待机态: 实时保持在初始增益 (PGA_GAIN_INIT_CODE), 防止突发巨响降增益后无法恢复 */
             if (PGA112_GetGain() != PGA_GAIN_INIT_CODE) {
                 PGA112_SetGain(PGA_GAIN_INIT_CODE);
                 PGA112_AGC_Reset();
