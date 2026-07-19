@@ -1,7 +1,7 @@
 # 声语信使 — 半双工项目进度文档
 
-> 最后更新: 2026-07-16
-> 阶段: v5.1 多窗口 Goertzel + 自适应 SNR + 软判决 Chase + ACK 协议
+> 最后更新: 2026-07-19
+> 阶段: v5.1 多窗口 Goertzel + 自适应 SNR + 软判决 Chase + PGA112 冻结式 AGC
 
 ---
 
@@ -53,7 +53,7 @@ HM_TX_BUSY (发送中)
 | DDS 时钟 | TIM3 ISR @ 16kHz (PSC=4, ARR=624) |
 | 键盘 | 4x4 矩阵, PA0~PA3 rows, **PA9~PA12** cols |
 | OLED | I2C1 (PB6/PB7), SSD1306 128x64 |
-| 第二级放大 | PGA112, SPI2 (PB12=CS, PB13=SCK, PB15=MOSI), **32x** 初始增益 |
+| 第二级放大 | PGA112, SPI2 (PB12=CS, PB13=SCK, PB15=MOSI), **16x** 初始增益 |
 | 外部存储 | PY25Q64 8MB SPI NOR Flash, SPI1 (PA4=CS, PA5=SCK, PA6=MISO, PA7=MOSI) |
 | 电源管理 | PB1=POWER_BUTTON (EXTI1), PB8=POWER_CTRL (硬件锁存) |
 | LED | PC13=收发状态指示, PB2=LEDG(绿/灭), PB10=LEDR(红/灭) |
@@ -300,6 +300,15 @@ receiver.c / voice_fec.c / voice_dsp.c):
 
 **编译结果**: FLASH 63556B (+14KB), RAM 17960B (+11KB). 0 error, 0 warning.
 
+### 2026-07-19 — 无 AGC v5.1 修复同步到带 AGC 分支
+
+- 软判决按交织索引逐码字解码，修复帧末越界，DMA 路径栈用量由 7016B 降至 200B。
+- 同步音使用 5ms 整数 bin 窗口定位；自适应 SNR 门限钳制在 2.0..20.0，避免纯净前导错误抬高门限。
+- PGA112 在进入数据段后锁定写入，SPI 两字节传输期间屏蔽 DMA 回调，避免数据 Goertzel 窗内发生增益阶跃。
+- 监听阶段检测到 PGA 档位变化时按档位比例同步差分能量噪声底；ADC DMA 启动前先完成 RX/PGA 初始化。
+- RX/TX 模式重启强制回到 16x 时保留切换前档位，首个采样块再同步噪声底，避免跨帧门限使用旧增益标尺。
+- 验证: ARM Debug 构建通过；FEC 1..51 字节往返与清洁帧 DSP 同步/CRC 仿真通过。
+
 
 ## 七、待完成
 
@@ -311,7 +320,7 @@ receiver.c / voice_fec.c / voice_dsp.c):
 - [ ] CRC 符号丢失率是否下降 (30ms 保护槽效果)
 - [ ] True SNR 对宽带噪声(风扇/空调)的免疫验证
 - [ ] 前导双重频域锁: 误唤醒率为零的验证
-- [ ] PGA112 32x 初始增益实机验证
+- [ ] PGA112 16x 初始增益实机验证
 - [ ] PY25Q64 SPI Flash 读写稳定性验证
 - [x] ~~CMakeLists.txt 移除死代码~~ fsk4_decoder.c + fsk16_encoder.c (保留: 仍有编译引用, 暂不删除)
 - [ ] receiver.h 清理 v4 遗留宏

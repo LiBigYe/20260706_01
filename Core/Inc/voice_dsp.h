@@ -55,6 +55,7 @@ extern "C" {
 
 /* ── v5.1 自适应 SNR ── */
 #define VD_SNR_MIN         2.0f   /* 绝对 SNR 下限 (6dB) */
+#define VD_SNR_ADAPTIVE_MAX 20.0f /* 防止静音噪声地板将门限放大至不可达 */
 
 typedef struct {
     uint8_t  state;

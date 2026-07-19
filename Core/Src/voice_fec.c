@@ -176,48 +176,22 @@ static uint16_t bits_to_symbols(const uint8_t *bits, uint16_t nbit, uint8_t *sym
 /*  v5.1 软判决: LLR 反交织 + Chase Hamming 软解码                            */
 /* ========================================================================== */
 
-/* 从符号 + mag² 计算 bit 级 LLR 数组, 同时做反交织 */
-static void symbols_to_llr(const uint8_t *syms, const float mag2[][4],
-                           uint16_t sym_count,
-                           float *llr_out, uint16_t *llr_len)
+/* 返回一个 4-FSK 符号中指定 bit 的 LLR。bit_in_symbol: 0=MSB, 1=LSB. */
+static float symbol_bit_llr(const uint8_t *syms, const float mag2[][4],
+                            uint16_t symbol_index, uint8_t bit_in_symbol)
 {
-    /* 每符号 2 bit → 2 LLR */
-    uint16_t nb = sym_count * 2U;
-    for (uint16_t i = 0; i < sym_count; i++) {
-        uint8_t d = syms[i];
-        float m2[4];
-        if (mag2) {
-            for (int j = 0; j < 4; j++) m2[j] = mag2[i][j];
-        } else {
-            /* 无 mag2: 用 hard-decision 近似 LLR (±1.0) */
-            for (int j = 0; j < 4; j++) m2[j] = (j == d) ? 1000000.0f : 1.0f;
-        }
-
-        /* symbols_to_bits() emits MSB first, then LSB. */
-        float E1_msb = m2[2] + m2[3];
-        float E0_msb = m2[0] + m2[1];
-        float E1_lsb = m2[1] + m2[3];
-        float E0_lsb = m2[0] + m2[2];
-
-        llr_out[i * 2U + 0U] = VoiceFEC_ComputeLLR(E1_msb, E0_msb);
-        llr_out[i * 2U + 1U] = VoiceFEC_ComputeLLR(E1_lsb, E0_lsb);
+    uint8_t d = syms[symbol_index];
+    float m2[4];
+    if (mag2) {
+        for (uint8_t i = 0; i < 4U; i++) m2[i] = mag2[symbol_index][i];
+    } else {
+        if (d > 3U) d = 0U;
+        for (uint8_t i = 0; i < 4U; i++) m2[i] = (i == d) ? 1000000.0f : 1.0f;
     }
-    *llr_len = nb;
-}
 
-/* 对 LLR 数组做反交织: LLR 值的排列与 bit 硬判决一致 */
-static void deinterleave_llr(const float *llr_in, uint16_t ncw, float *llr_cw)
-{
-    /* ncw 个码字, 每码字 7 bit → 7×ncw 个 LLR */
-    for (uint16_t c = 0; c < ncw; c++) {
-        for (uint8_t b = 0; b < 7U; b++) llr_cw[c * 7U + b] = 0.0f;
-    }
-    uint16_t o = 0;
-    for (uint8_t col = 0; col < 7U; col++) {
-        for (uint16_t row = 0; row < ncw; row++) {
-            llr_cw[row * 7U + (6U - col)] = llr_in[o++];
-        }
-    }
+    if (bit_in_symbol == 0U)
+        return VoiceFEC_ComputeLLR(m2[2] + m2[3], m2[0] + m2[1]);
+    return VoiceFEC_ComputeLLR(m2[1] + m2[3], m2[0] + m2[2]);
 }
 
 /* Chase 软 Hamming 解码一个 7-bit 码字:
@@ -318,32 +292,9 @@ uint8_t VoiceFEC_ParseDataSymbolsSoft(
 
     /* 2. body 符号区 (LEN 之后) */
     const uint8_t *body_syms = syms + VP_LEN_SYMBOLS;
-    const float   *body_mag2 = mag2 ? &mag2[VP_LEN_SYMBOLS][0] : NULL;
-    uint16_t body_nsym = (uint16_t)(VP_LEN_BYTES + payload_len + VP_CRC_BYTES) * VP_SYMS_PER_BYTE;
+    const float (*body_mag2)[4] = mag2 ? mag2 + VP_LEN_SYMBOLS : NULL;
     uint16_t body_nbytes = (uint16_t)(payload_len + VP_CRC_BYTES);
-
-    /* 3. 符号 → LLR */
-    float llr_body[VP_CODED_MAX_BYTES * 14U];
-    uint16_t llr_len;
-    /* 构造本地 mag2 视图 (body 部分) */
-    if (body_mag2) {
-        symbols_to_llr(body_syms, (const float(*)[4])body_mag2,
-                       body_nsym, llr_body, &llr_len);
-    } else {
-        symbols_to_llr(body_syms, NULL, body_nsym, llr_body, &llr_len);
-    }
-
-    /* 4. 反交织 LLR */
     uint16_t ncw = (uint16_t)(body_nbytes * 2U);
-    float llr_cw[VP_CODED_MAX_BYTES * 14U];  /* ncw * 7 */
-    deinterleave_llr(llr_body, ncw, llr_cw);
-
-    /* 5. 每码字: 获取硬判 + |LLR|, 调用 Chase */
-    /* 先获取硬判 bit (仍用 symbols_to_bits, 因 LLR 不改变硬判方向) */
-    uint8_t hard_bits[VP_CODED_MAX_BYTES * 14U];
-    (void)symbols_to_bits(body_syms, body_nsym, hard_bits);
-    uint8_t cw_hard[VP_CODED_MAX_BYTES * 2U];
-    deinterleave_codewords(hard_bits, ncw, cw_hard);
 
     uint8_t body_out[VP_MAX_PAYLOAD_BYTES + VP_CRC_BYTES];
     for (uint16_t i = 0; i < body_nbytes; i++) {
@@ -354,11 +305,12 @@ uint8_t VoiceFEC_ParseDataSymbolsSoft(
             uint16_t ci = i * 2U + nib;
             uint8_t hard[7];
             float   abs_llr[7];
-            for (int b = 0; b < 7; b++) {
-                hard[b] = (cw_hard[ci] >> (6U - b)) & 1U;
-                abs_llr[b] = (llr_cw[ci * 7U + b] > 0.0f)
-                             ? llr_cw[ci * 7U + b]
-                             : -llr_cw[ci * 7U + b];
+            for (uint8_t b = 0; b < 7U; b++) {
+                uint16_t wire_bit = (uint16_t)(b * ncw + ci);
+                float llr = symbol_bit_llr(body_syms, body_mag2,
+                                           wire_bit / 2U, wire_bit & 1U);
+                hard[b] = (llr >= 0.0f) ? 1U : 0U;
+                abs_llr[b] = (llr >= 0.0f) ? llr : -llr;
             }
             uint8_t nibble = chase_hamming_decode(hard, abs_llr);
             if (nib == 0U) nib_hi = nibble;

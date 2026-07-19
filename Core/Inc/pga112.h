@@ -42,6 +42,7 @@ HAL_StatusTypeDef PGA112_SetGain(uint8_t gain_code);
 uint8_t PGA112_RequestGain(uint8_t gain_code);
 void    PGA112_Service(void);
 void    PGA112_CancelPending(void);
+void    PGA112_SetUpdatesFrozen(uint8_t frozen);
 uint8_t PGA112_IsPending(void);
 uint8_t PGA112_GetGain(void);
 extern volatile uint8_t g_pga_gain_live;

@@ -244,24 +244,36 @@ static void ring_extract(uint32_t start_abs, uint16_t len, uint16_t *out)
     }
 }
 
-/* 同步音回扫: 在环形缓冲中从当前位置反向扫描, 找 1800Hz 上升沿起点 */
+/* 同步音回扫: 5ms 窗口下 1800Hz 正好位于整数 bin 9, 可稳定定位起点。 */
+#define VD_SYNC_ONSET_WIN   80U
+#define VD_SYNC_ONSET_STEP   8U
+#define VD_SYNC_SCAN_BACK  400U
+
+static float sync_window_mag2(uint32_t start_abs)
+{
+    uint16_t win[VD_SYNC_ONSET_WIN];
+    ring_extract(start_abs, VD_SYNC_ONSET_WIN, win);
+
+    uint32_t sum = 0U;
+    for (uint16_t i = 0; i < VD_SYNC_ONSET_WIN; i++) sum += win[i];
+    return goertzel_mag2(win, VD_SYNC_ONSET_WIN, 9,
+                         (float)sum / (float)VD_SYNC_ONSET_WIN);
+}
+
 static uint32_t sync_find_onset(uint32_t now)
 {
-    /* 取最后 192 样本 (12ms) 做滑动窗口 Goertzel 求最大 1800Hz 响应 */
-    #define SYNC_SCAN_LEN  192U
-    #define SYNC_STEP        8U
-    float best_m = 0.0f;
-    uint32_t best_off = 0;
-    for (uint32_t off = 0; off < SYNC_SCAN_LEN - VD_WIN; off += SYNC_STEP) {
-        uint16_t w[VD_WIN];
-        ring_extract(now - SYNC_SCAN_LEN + off, VD_WIN, w);
-        uint32_t s = 0;
-        for (uint16_t i = 0; i < VD_WIN; i++) s += w[i];
-        float dc = (float)s / (float)VD_WIN;
-        float m = goertzel_mag2(w, VD_WIN, vd_center_k[VP_SYNC_DIGIT], dc);
-        if (m > best_m) { best_m = m; best_off = off; }
+    uint32_t lo = (now > VD_SYNC_SCAN_BACK) ? now - VD_SYNC_SCAN_BACK : 0U;
+    uint32_t hi = (now > VD_SYNC_ONSET_WIN) ? now - VD_SYNC_ONSET_WIN : 0U;
+    float peak = 0.0f;
+
+    for (uint32_t p = lo; p <= hi; p += VD_SYNC_ONSET_STEP) {
+        float m = sync_window_mag2(p);
+        if (m > peak) peak = m;
     }
-    return now - SYNC_SCAN_LEN + best_off;
+    for (uint32_t p = lo; p <= hi; p += VD_SYNC_ONSET_STEP) {
+        if (sync_window_mag2(p) >= peak * 0.8f) return p;
+    }
+    return lo;
 }
 
 /* ========================================================================== */
@@ -359,6 +371,7 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     /* 差分能量。AGC 在数据段前冻结，数据判决不依赖增益码。 */
     uint32_t energy_raw = VoiceDSP_DiffEnergy(blk, VD_BLOCK);
     uint32_t energy_norm = energy_raw;
+    rx->last_energy = energy_raw;
 
     uint32_t thr = (rx->noise_floor > 0U ? rx->noise_floor : VD_EN_FLOOR_INIT)
                    + VD_EN_MARGIN;
@@ -439,13 +452,15 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
             rx->lo_run = 0;
             rx->erase_run = 0;
 
-            /* 自适应 SNR 门限 = max(VD_SNR_MIN, 前导均值 × 0.5) */
+            /* 纯净前导会把 p_noise 钳到数值地板，门限必须有上限。 */
             if (rx->preamble_snr_count > 0U) {
                 float avg_snr = rx->preamble_snr_sum
                               / (float)rx->preamble_snr_count;
                 rx->data_snr_threshold = avg_snr * 0.5f;
                 if (rx->data_snr_threshold < VD_SNR_MIN)
                     rx->data_snr_threshold = VD_SNR_MIN;
+                if (rx->data_snr_threshold > VD_SNR_ADAPTIVE_MAX)
+                    rx->data_snr_threshold = VD_SNR_ADAPTIVE_MAX;
             } else {
                 rx->data_snr_threshold = VD_SNR_MIN;
             }

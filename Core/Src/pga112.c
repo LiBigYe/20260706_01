@@ -6,6 +6,7 @@ extern SPI_HandleTypeDef hspi2;
 volatile uint8_t  g_pga_gain_live = PGA_GAIN_INVALID;
 static volatile uint8_t pga_gain_requested = PGA_GAIN_INIT_CODE;
 static volatile uint8_t pga_write_pending = 0U;
+static volatile uint8_t pga_updates_frozen = 0U;
 static volatile uint16_t pga_last_vpp = 0U;
 static volatile HAL_StatusTypeDef pga_last_status = HAL_OK;
 static volatile uint32_t pga_error_count = 0U;
@@ -58,6 +59,7 @@ HAL_StatusTypeDef PGA112_SetGain(uint8_t gain_code)
 uint8_t PGA112_RequestGain(uint8_t gain_code)
 {
     gain_code = pga_clamp_gain(gain_code);
+    if (pga_updates_frozen != 0U) return 0U;
     if (pga_write_pending == 0U && g_pga_gain_live == gain_code) {
         return 0U;
     }
@@ -77,19 +79,25 @@ void PGA112_Service(void)
     if (pga_write_pending == 0U) return;
     if ((int32_t)(HAL_GetTick() - pga_next_retry_tick) < 0) return;
 
+    /* The DMA callback changes the lock when it enters DATA. Mask only that
+     * callback while shifting two SPI bytes so an accepted write always
+     * completes before the state transition that freezes the gain. */
+    uint32_t dma_irq_was_enabled = NVIC_GetEnableIRQ(DMA2_Stream0_IRQn);
+    HAL_NVIC_DisableIRQ(DMA2_Stream0_IRQn);
+    if (pga_updates_frozen != 0U || pga_write_pending == 0U) {
+        if (dma_irq_was_enabled != 0U) HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+        return;
+    }
+
     uint8_t gain_code = pga_gain_requested;
     HAL_StatusTypeDef status = pga_write_gain(gain_code);
     if (status == HAL_OK) {
         pga_next_retry_tick = 0U;
-        if (pga_write_pending == 0U && pga_gain_requested != gain_code) {
-            /* An ISR cancelled this request while the SPI peripheral shifted it. */
-            pga_gain_requested = g_pga_gain_live;
-        } else if (pga_gain_requested == gain_code) {
-            pga_write_pending = 0U;
-        }
+        pga_write_pending = 0U;
     } else {
         pga_next_retry_tick = HAL_GetTick() + 10U;
     }
+    if (dma_irq_was_enabled != 0U) HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 }
 
 void PGA112_CancelPending(void)
@@ -99,6 +107,12 @@ void PGA112_CancelPending(void)
         pga_write_pending = 0U;
         pga_next_retry_tick = 0U;
     }
+}
+
+void PGA112_SetUpdatesFrozen(uint8_t frozen)
+{
+    pga_updates_frozen = frozen ? 1U : 0U;
+    if (pga_updates_frozen != 0U) PGA112_CancelPending();
 }
 
 uint8_t PGA112_GetGain(void) { return g_pga_gain_live; }

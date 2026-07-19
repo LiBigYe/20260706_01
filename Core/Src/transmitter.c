@@ -120,21 +120,17 @@ void TX_Tick(void)
         break;
 
     case ST_DATA:
-        if (tx_sym_idx >= tx_sym_count) {
+        if (tx_slot_tick == TICKS_TONE) {
             tx_guard();
-            if (tx_slot_tick >= TICKS_SLOT) {
+        } else if (tx_slot_tick >= TICKS_SLOT) {
+            tx_slot_tick = 0;
+            tx_sym_idx++;
+            if (tx_sym_idx >= tx_sym_count) {
                 tx_state = ST_POSTAMBLE;
                 tx_tick = 0;
                 tx_set_symbol(VP_PILOT_HI);
-            }
-        } else {
-            if (tx_slot_tick == TICKS_TONE) {
-                tx_guard();
-            } else if (tx_slot_tick >= TICKS_SLOT) {
-                tx_slot_tick = 0;
-                tx_sym_idx++;
-                if (tx_sym_idx < tx_sym_count)
-                    tx_set_symbol(tx_symbols[tx_sym_idx]);
+            } else {
+                tx_set_symbol(tx_symbols[tx_sym_idx]);
             }
         }
         break;

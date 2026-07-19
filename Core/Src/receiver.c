@@ -73,6 +73,7 @@ static uint8_t  rx_scroll_line;
 
 static uint8_t  rx_last_digit;
 static float    rx_last_mag[4];
+static uint8_t  rx_agc_gain_seen;
 
 static const char *state_names[6] =
     {"IDLE", "LISTENING", "PREAMBLE", "DATA", "DONE", "ERROR"};
@@ -89,6 +90,38 @@ static void rx_sync_state(void)
     }
 }
 
+static void rx_restart_listening(void)
+{
+    VoiceRx_Start(&vrx);
+    rx_sync_state();
+    PGA112_SetUpdatesFrozen(0U);
+    PGA112_CancelPending();
+    PGA112_AGC_Reset();
+    (void)PGA112_RequestGain(PGA_GAIN_INIT_CODE);
+    HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+}
+
+static void rx_update_noise_for_gain(void)
+{
+    uint8_t gain = PGA112_GetGain();
+    if (gain > PGA_GAIN_MAX_CODE) return;
+
+    if (rx_agc_gain_seen <= PGA_GAIN_MAX_CODE && gain != rx_agc_gain_seen &&
+        vrx.state == VD_LISTEN) {
+        if (gain > rx_agc_gain_seen) {
+            uint8_t steps = gain - rx_agc_gain_seen;
+            while (steps-- > 0U && vrx.noise_floor <= (UINT32_MAX / 2U))
+                vrx.noise_floor *= 2U;
+        } else {
+            vrx.noise_floor >>= (rx_agc_gain_seen - gain);
+        }
+        vrx.hi_run = 0U;
+        vrx.pilot_hits = 0U;
+    }
+    rx_agc_gain_seen = gain;
+}
+
 /* ========================================================================== */
 /*  内部 — 帧完成处理 (地址过滤 + 填充显示缓冲)                                  */
 /* ========================================================================== */
@@ -97,15 +130,13 @@ static void rx_on_frame_done(void)
     HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 
     if (!vrx.crc_ok) {
-        VoiceRx_Start(&vrx);
-        rx_sync_state();
+        rx_restart_listening();
         return;
     }
 
     /* payload = [src, mask_lo, mask_hi, text...] */
     if (vrx.payload_len < VP_HEADER_BYTES) {
-        VoiceRx_Start(&vrx);
-        rx_sync_state();
+        rx_restart_listening();
         return;
     }
 
@@ -131,8 +162,7 @@ static void rx_on_frame_done(void)
         HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
     } else {
         /* 非本机 → 丢弃, 重新监听 */
-        VoiceRx_Start(&vrx);
-        rx_sync_state();
+        rx_restart_listening();
     }
 }
 
@@ -149,19 +179,26 @@ void RX_Init(void)
     rx_msg_length = 0; rx_display_len = 0;
     rx_source_id = 0; rx_target_mask = 0; rx_display_source_id = 0;
     rx_scroll_line = 0; rx_last_digit = 0xFF;
+    rx_agc_gain_seen = PGA_GAIN_INVALID;
     for (int i = 0; i < 4; i++) rx_last_mag[i] = 0.0f;
 }
 
 void RX_Start(void)
 {
+    uint8_t previous_gain = PGA112_GetGain();
+
     VoiceRx_Start(&vrx);
     rx_done_flag = 0;
     memset(rx_message, 0, sizeof(rx_message));
     rx_msg_length = 0; rx_source_id = 0; rx_target_mask = 0;
     rx_sync_state();
+    PGA112_SetUpdatesFrozen(0U);
     PGA112_CancelPending();
     PGA112_AGC_Reset();
     PGA112_SetGain(PGA_GAIN_INIT_CODE);
+    /* VoiceRx_Start intentionally retains noise_floor.  Leave the previous
+     * gain visible until the first block rescales it for the forced 16x gain. */
+    rx_agc_gain_seen = previous_gain;
     /* 收信指示灯待机熄灭 */
     HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
@@ -172,6 +209,7 @@ void RX_Stop(void)
     rx_state = RX_STATE_IDLE;
     rx_done_flag = 0;
     PGA112_CancelPending();
+    PGA112_SetUpdatesFrozen(1U);
     PGA112_AGC_Reset();
     HAL_GPIO_WritePin(LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
 }
@@ -183,6 +221,8 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
     for (uint8_t i = 0; i < RX_SUBBLOCKS_PER_HALF; i++) {
         const uint16_t *sub = buf + (uint16_t)i * RX_ENV_BLOCK_SIZE;
 
+        rx_update_noise_for_gain();
+
         /* First update DSP state, then make an AGC decision for this block. */
         uint8_t was_data = (vrx.state == VD_DATA);
         uint8_t done = VoiceRx_PushBlock(&vrx, sub);
@@ -191,9 +231,10 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
 
         if (now_data) {
             /* A queued preamble adjustment must never take effect in DATA. */
-            PGA112_CancelPending();
+            PGA112_SetUpdatesFrozen(1U);
             PGA112_AGC_Reset();
         } else if (vrx.state == VD_PREAMBLE) {
+            PGA112_SetUpdatesFrozen(0U);
             if (vrx.pilot_trans < VD_AGC_FREEZE_TRANS) {
                 PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_LOCKED);
             } else {
@@ -202,9 +243,11 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
             }
         } else if (vrx.state == VD_LISTEN &&
                    vrx.hi_run >= VD_PREAMBLE_MIN_HI) {
+            PGA112_SetUpdatesFrozen(0U);
             /* Candidate energy is enough to pursue, but not yet a validated frame. */
             PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_ACQUIRE);
         } else if (vrx.state == VD_LISTEN) {
+            PGA112_SetUpdatesFrozen(0U);
             if (PGA112_RequestGain(PGA_GAIN_INIT_CODE)) {
                 PGA112_AGC_Reset();
             }

@@ -1,5 +1,5 @@
 # AGENTS.md — 声语信使 半双工 (项目03) 代码实际描述
-# 最后更新: 2026-07-18
+# 最后更新: 2026-07-19
 # 原则: 以代码为准, 本文档必须在每次代码变更后同步更新
 
 # 项目03 — 半双工 (Half-Duplex)
@@ -163,13 +163,14 @@
 - 增益档 0..7 = 1/2/4/8/16/32/64/128 倍
 - PGA112 命令为 16bit: 写增益 `0x2A, (gain_code << 4)`, 退出软件关断 `0xC2, 0x00`。
 - 增益写入分两步: DMA 回调中仅 `PGA112_RequestGain()`，主循环中的 `PGA112_Service()` 再执行 SPI 轮询，避免 SPI 超时阻塞采样处理。
+- `PGA112_Service()` 在两字节 SPI 写入期间屏蔽 DMA2 Stream0 回调，并检查 `PGA112_SetUpdatesFrozen()` 写锁；进入 `VD_DATA` 后不会再启动或完成新的 PGA 写入。
 - `PGA112_SetGain()` / `PGA112_Init()` 返回 HAL 状态；`PGA112_GetLastStatus()` 与 `PGA112_GetErrorCount()` 供诊断。SPI 失败的异步请求以 10ms 间隔重试。PGA112 未接 MISO，`HAL_OK` 只能证明 STM32 SPI 已发送，不能证明芯片物理接收。
 - AGC 以 ADC 峰峰值控制，目标死区为 1120..2234 counts（约 0.9..1.8Vpp，VDDA=3.3V 时）。同一 5ms 块内至少 3 个近轨采样才触发即时降档。
 - AGC 调度策略 (receiver.c `RX_ProcessHalfBuffer`):
   - **VD_LISTEN 静默**: 保持 16x；退出前导后恢复初始增益并清空 AGC 计数器。
   - **VD_LISTEN 候选信号**: 连续 6 个高能量块后，仅允许上调至 64x，帮助弱导频通过频域锁，避免静态底噪爬升。
   - **VD_PREAMBLE**: 前 4 次导频交替内闭环调节，可在 16x..128x 间升降；之后冻结，给同步音保留约 40ms 稳定时间。
-  - **VD_DATA**: 取消未执行的前导写请求并冻结增益，保证数据段 Goertzel 窗内没有增益阶跃。
+  - **VD_DATA**: 取消未执行的前导写请求并冻结增益，保证数据段 Goertzel 窗内没有增益阶跃；增益变更时仅在 `VD_LISTEN` 按 2 倍档位比例同步 DSP 噪声底。
 
 ## v5.1 DSP 核心 (voice_dsp.c)
 
@@ -184,6 +185,7 @@
 - **LiveWatch 诊断接口**: `RX_GetPilotHits/GetEraseRun/GetLastSNR/GetVGain/GetAGCVpp/GetPGAErrorCount/GetDspSubState`；`RX_GetLastSNR()` 返回线性值而非 dB。
 - 多窗口数据 SNR 的信号能量与总能量均按相同的三个重叠 160-sample 窗累加，避免分子和分母标尺不一致。
 - 软判决 LLR 使用归一化尾数 LUT + `ln(2)` 倍频，覆盖 1:1 到 100:1；4-FSK 的 LLR 位序与 MSB/LSB 硬判位序一致。
+- 同步起点用 5ms、1800Hz 整数 bin 的滑动窗定位；数据段自适应 SNR 门限限制在 2.0..20.0，避免纯净前导的数值噪声地板拒绝正常数据。
 
 ## 开机流程
 
@@ -210,6 +212,7 @@
 | 2026-07-15 | 状态驱动冻结式 AGC + 帧尾 30ms DC 保护槽 |
 | 2026-07-16 | v5.1 True SNR 分类器 + 频域抗噪重构 (当前版本) |
 | 2026-07-18 | PGA112 AGC 重构: 候选弱信号获取、统一 Vpp 死区、三采样削顶判定、DMA 回调外 SPI 服务与错误诊断；修正 16x 初始档、SDN_DIS 命令、CRC 完成门控、LED 结束时机、多窗口 SNR 标尺与软判决 LLR 位序/LUT。 |
+| 2026-07-19 | 同步无 AGC v5.1 修复到带 AGC 分支：低栈软解码、帧末边界、同步定位、SNR 门限上限、发送尾部时序与诊断能量；修复 PGA 数据段写入竞争、模式重启强制 16x 后及监听调档后的噪声底失配。 |
 
 ## 待验证项
 

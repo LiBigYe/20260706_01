@@ -201,9 +201,9 @@ static void HM_StopRxSampling(void)
 
 static void HM_StartRxSampling(void)
 {
+    RX_Start();
     HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buf, ADC_BUF_SIZE);
     HAL_TIM_Base_Start(&htim2);
-    RX_Start();
 }
 
 static void HM_SwitchToRx(void)
