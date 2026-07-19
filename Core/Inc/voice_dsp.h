@@ -70,8 +70,7 @@ typedef struct {
     uint8_t  sync_hits;        /* 连续 1800Hz 同步命中数 */
     uint16_t block_in_pre;
     uint8_t  pilot_last;
-    uint8_t  pilot_trans;      /* 已确认的 1500/2400 交替次数 */
-    uint16_t pre_timeout;
+    uint8_t  pilot_trans;      /* 当前候选中的 1500/2400 切换次数 */
 
     /* 数据栅格自由运行 */
     uint16_t slot_block;       /* 当前槽内块号 0..5 */

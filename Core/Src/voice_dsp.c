@@ -123,15 +123,15 @@ static float bandpass_sample(uint16_t sample)
 /* Preamble and sync use the same single-window classifier. Keep their
  * amplitude gates low enough for range; their frequency sequence is the
  * primary false-trigger protection. */
-#define VD_PILOT_CARRIER_MAG2_MIN 30.0f
-#define VD_PILOT_ACTIVITY_POWER_MIN 5.0f
+#define VD_PILOT_CARRIER_MAG2_MIN 60.0f
+#define VD_PILOT_ACTIVITY_POWER_MIN 10.0f
 /* Once preamble and sync have locked the frame, let frequency dominance and
  * soft FEC recover weak symbols instead of rejecting them by amplitude. */
 #define VD_DATA_CARRIER_MAG2_MIN 10.0f
 #define VD_DATA_ACTIVITY_POWER_MIN 4.0f
 /* These gates apply only while acquiring a frame. A data symbol may be weak,
  * but an idle receiver must not wake on a broad or incidental tone. */
-#define VD_PILOT_FREQ_RATIO_MIN  1.45f
+#define VD_PILOT_FREQ_RATIO_MIN  1.55f
 /* When waveform distortion inflates time-domain P_total, a tone may still be
  * unambiguous if its compensated target-bin energy dominates the other tones. */
 #define VD_FREQ_RATIO_MIN   1.35f
@@ -139,50 +139,8 @@ static float bandpass_sample(uint16_t sample)
 
 /* ---- 前导/同步参数 ---- */
 #define VD_PRE_TIMEOUT      50U     /* 候选前导 250ms 内必须见到同步音 */
-#define VD_MIN_PILOT_TRANS   2U     /* 两次交替后才允许锁定同步和数据栅格 */
-#define VD_SYNC_PILOT_HITS_MIN 3U  /* 同步前最后一段导频至少稳定 15ms */
+#define VD_PILOT_HITS_REQ    4U     /* 同一导频连续命中次数 */
 #define VD_SYNC_HITS_REQ     2U     /* 1800Hz 同步音连续命中次数 */
-/* Two adjacent 5ms classifications reject isolated noise without imposing a
- * brittle timing window on the 40ms transmitted pilot. */
-#define VD_PILOT_RUN_MIN     2U
-
-static void pilot_sequence_reset(VoiceRx *rx)
-{
-    rx->pilot_last = 0xFFU;
-    rx->pilot_hits = 0U;
-    rx->pilot_trans = 0U;
-}
-
-/* A valid preamble is simply three stable alternating pilot decisions. */
-static void pilot_sequence_observe(VoiceRx *rx, uint8_t digit)
-{
-    if (digit != VP_PILOT_LO && digit != VP_PILOT_HI) {
-        pilot_sequence_reset(rx);
-        return;
-    }
-
-    if (rx->pilot_last == 0xFFU) {
-        rx->pilot_last = digit;
-        rx->pilot_hits = 1U;
-        return;
-    }
-
-    if (digit == rx->pilot_last) {
-        if (rx->pilot_hits != 0xFFU) rx->pilot_hits++;
-        return;
-    }
-
-    if (rx->pilot_hits < VD_PILOT_RUN_MIN) {
-        rx->pilot_last = digit;
-        rx->pilot_hits = 1U;
-        rx->pilot_trans = 0U;
-        return;
-    }
-
-    rx->pilot_last = digit;
-    rx->pilot_hits = 1U;
-    if (rx->pilot_trans != 0xFFU) rx->pilot_trans++;
-}
 
 /* ========================================================================== */
 /*  Goertzel                                                                   */
@@ -436,7 +394,8 @@ void VoiceRx_Init(VoiceRx *rx)
     rx->state = VD_LISTEN;
     rx->noise_floor = VD_EN_FLOOR_INIT;
     rx->data_snr_threshold = VD_SNR_MIN;
-    pilot_sequence_reset(rx);
+    rx->pilot_last = 0xFFU;
+    rx->pilot_trans = 0U;
 }
 
 void VoiceRx_Start(VoiceRx *rx)
@@ -451,7 +410,10 @@ void VoiceRx_Start(VoiceRx *rx)
     vd_ring_pos = 0;
     vd_total = 0;
     vd_grid_start = 0;
-    pilot_sequence_reset(rx);
+    rx->pilot_last = 0xFFU;
+    rx->pilot_hits = 0U;
+    rx->pilot_trans = 0U;
+    rx->sync_hits = 0U;
     rx->erase_run  = 0;
 }
 
@@ -548,42 +510,58 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     switch (rx->state) {
 
     case VD_LISTEN:
-        /* Energy only wakes the frequency test. Frame acquisition is decided
-         * by the alternating pilot sequence below, not by a long energy run. */
+        /* A 10ms window advances by only 5ms, so two hits may contain the
+         * same impulse twice. Require a stable pilot plateau plus one actual
+         * 1500/2400 transition before spending time waiting for sync. */
         if ((hi || rx->pilot_hits != 0U) && vd_total >= VD_WIN) {
             ring_extract(vd_total - VD_WIN, VD_WIN, vd_work_win);
             float lconf;
             uint8_t ld = VoiceDSP_Classify(vd_work_win, VD_WIN, &lconf, NULL);
-            pilot_sequence_observe(rx, ld);
-            if (rx->pilot_trans >= VD_MIN_PILOT_TRANS) {
+            if (ld == VP_PILOT_LO || ld == VP_PILOT_HI) {
+                if (ld == rx->pilot_last) {
+                    if (rx->pilot_hits != 0xFFU) rx->pilot_hits++;
+                } else {
+                    if (rx->pilot_last != 0xFFU &&
+                        rx->pilot_trans != 0xFFU) {
+                        rx->pilot_trans++;
+                    }
+                    rx->pilot_last = ld;
+                    rx->pilot_hits = 1U;
+                }
+            } else {
+                rx->pilot_last = 0xFFU;
+                rx->pilot_hits = 0U;
+                rx->pilot_trans = 0U;
+            }
+            if (rx->pilot_hits >= VD_PILOT_HITS_REQ &&
+                rx->pilot_trans >= 1U) {
                 rx->state = VD_PREAMBLE;
                 rx->block_in_pre = 0;
                 rx->sync_hits = 0U;
             }
         } else {
-            pilot_sequence_reset(rx);
+            rx->pilot_last = 0xFFU;
+            rx->pilot_hits = 0U;
+            rx->pilot_trans = 0U;
         }
         break;
 
     case VD_PREAMBLE: {
         rx->block_in_pre++;
-        if (rx->block_in_pre > VD_PRE_TIMEOUT) {
-            /* A full preamble timeout proves that this sustained energy was
-             * not a valid frame.  Raise the floor promptly instead of entering
-             * the same false-preamble loop again. */
-            if (energy_norm > rx->noise_floor) rx->noise_floor = energy_norm;
-            rx->state = VD_LISTEN; rx->hi_run = 0; break;
+        if (rx->lo_run > 10U || rx->block_in_pre > VD_PRE_TIMEOUT) {
+            rx->state = VD_LISTEN;
+            rx->hi_run = 0U;
+            rx->pilot_last = 0xFFU;
+            rx->pilot_hits = 0U;
+            rx->pilot_trans = 0U;
+            rx->sync_hits = 0U;
+            break;
         }
         if (vd_total < VD_WIN) break;
         ring_extract(vd_total - VD_WIN, VD_WIN, vd_work_win);
         uint8_t d = VoiceDSP_Classify(vd_work_win, VD_WIN, NULL, NULL);
 
-        if (d == VP_PILOT_LO || d == VP_PILOT_HI) {
-            pilot_sequence_observe(rx, d);
-            rx->sync_hits = 0U;
-        } else if (d == VP_SYNC_DIGIT &&
-                   rx->pilot_trans >= VD_MIN_PILOT_TRANS &&
-                   rx->pilot_hits >= VD_SYNC_PILOT_HITS_MIN) {
+        if (d == VP_SYNC_DIGIT) {
             if (rx->sync_hits != 0xFFU) rx->sync_hits++;
             if (rx->sync_hits < VD_SYNC_HITS_REQ) break;
 
