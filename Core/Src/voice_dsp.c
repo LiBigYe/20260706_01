@@ -117,29 +117,19 @@ static float bandpass_sample(uint16_t sample)
 #define VD_EN_MARGIN       24U
 #define VD_EN_MIN          32U
 #define VD_STARTUP_QUIET    15U   /* ~75ms: still leaves 125ms of preamble */
-/* Pilot and sync must withstand ambient narrowband noise.  The multi-window
- * data detector keeps its lower gates so this change does not reduce range
- * after a frame has been acquired. */
-/* Preamble and sync use the same single-window classifier. Keep their
- * amplitude gates low enough for range; their frequency sequence is the
- * primary false-trigger protection. */
-#define VD_PILOT_CARRIER_MAG2_MIN 60.0f
-#define VD_PILOT_ACTIVITY_POWER_MIN 10.0f
-/* Once preamble and sync have locked the frame, let frequency dominance and
- * soft FEC recover weak symbols instead of rejecting them by amplitude. */
-#define VD_DATA_CARRIER_MAG2_MIN 10.0f
-#define VD_DATA_ACTIVITY_POWER_MIN 4.0f
-/* These gates apply only while acquiring a frame. A data symbol may be weak,
- * but an idle receiver must not wake on a broad or incidental tone. */
+/* All symbol decisions are relative: absolute ADC amplitude is not a receive
+ * criterion. The 2s pilot sequence provides the acquisition protection. */
 #define VD_PILOT_FREQ_RATIO_MIN  1.55f
 /* When waveform distortion inflates time-domain P_total, a tone may still be
  * unambiguous if its compensated target-bin energy dominates the other tones. */
 #define VD_FREQ_RATIO_MIN   1.35f
-#define VD_FREQ_RATIO_FLOOR 0.01f
+#define VD_FREQ_RATIO_FLOOR 1.0e-12f
 
 /* ---- 前导/同步参数 ---- */
-#define VD_PRE_TIMEOUT      50U     /* 候选前导 250ms 内必须见到同步音 */
-#define VD_PILOT_HITS_REQ    4U     /* 同一导频连续命中次数 */
+#define VD_PRE_TIMEOUT      380U    /* 最早锁定后仍覆盖余下 2s 前导 */
+#define VD_PILOT_HITS_REQ    2U     /* 混响后同一导频的最低稳定命中数 */
+#define VD_PILOT_TRANS_REQ   8U     /* 长前导至少八次有效 1500/2400 交替 */
+#define VD_PILOT_GAP_MAX     6U     /* 换频混响/衰落时容忍最多 30ms 无效窗 */
 #define VD_SYNC_HITS_REQ     2U     /* 1800Hz 同步音连续命中次数 */
 
 /* ========================================================================== */
@@ -185,12 +175,6 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
         p_total += dev * dev;
     }
 
-    if (p_total < VD_PILOT_ACTIVITY_POWER_MIN) {
-        if (conf_out) *conf_out = 0.0f;
-        if (mag2_out) { for (int i = 0; i < 4; i++) mag2_out[i] = 0.0f; }
-        return 0xFFU;
-    }
-
     /* 3. Goertzel 三 bin 频带能量, 记录 raw_mag 和 wgt_mag */
     float raw_mag[4];
     float wgt_mag[4];
@@ -227,9 +211,8 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
     if (conf_out) *conf_out = snr;
 
     /* 6. 判决 */
-    if (raw_mag[best] < VD_PILOT_CARRIER_MAG2_MIN) return 0xFFU;
-    /* Preamble acquisition requires a narrow carrier. Do not let a merely
-     * energetic block bypass its frequency check through wideband SNR. */
+    /* Narrow-band dominance, not absolute amplitude, validates a pilot or
+     * sync window. Silence has zero ratio and therefore remains an erasure. */
     if (freq_ratio < VD_PILOT_FREQ_RATIO_MIN) return 0xFFU;
 
     return (uint8_t)best;
@@ -291,20 +274,15 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
     float freq_ratio = bestv / (secondv > VD_FREQ_RATIO_FLOOR ?
                                 secondv : VD_FREQ_RATIO_FLOOR);
 
-    /* ── 绝对载波能量 ── */
-    if (window_count == 0U ||
-        acc_mag2[best] < VD_DATA_CARRIER_MAG2_MIN * (float)window_count) {
+    if (window_count == 0U) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
 
-    /* The numerator and denominator must cover the same overlapping windows. */
+    /* The numerator and denominator cover the same windows. No absolute
+     * activity gate is used: frequency dominance and soft FEC decide whether
+     * a weak symbol is recoverable. */
     float alpha = 2.0f / (float)VD_WIN;
-    if (p_total < VD_DATA_ACTIVITY_POWER_MIN * (float)window_count) {
-        if (conf_out) *conf_out = 0.0f;
-        return 0xFFU;
-    }
-
     float p_signal = acc_mag2[best] * alpha;
     float p_noise = p_total - p_signal;
     if (p_noise < 1.0f) p_noise = 1.0f;
@@ -396,6 +374,7 @@ void VoiceRx_Init(VoiceRx *rx)
     rx->data_snr_threshold = VD_SNR_MIN;
     rx->pilot_last = 0xFFU;
     rx->pilot_trans = 0U;
+    rx->pilot_gap = 0U;
 }
 
 void VoiceRx_Start(VoiceRx *rx)
@@ -413,6 +392,7 @@ void VoiceRx_Start(VoiceRx *rx)
     rx->pilot_last = 0xFFU;
     rx->pilot_hits = 0U;
     rx->pilot_trans = 0U;
+    rx->pilot_gap = 0U;
     rx->sync_hits = 0U;
     rx->erase_run  = 0;
 }
@@ -493,8 +473,8 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     /* Establish a real local floor before permitting the first preamble lock.
      * The former path stopped learning whenever the initial block exceeded the
      * placeholder threshold, leaving the floor at 32 and permanently treating
-     * ambient audio as a candidate frame.  A 75ms calibration still leaves
-     * enough of the 200ms preamble for the pilot-transition check. */
+     * ambient audio as a candidate frame. A 75ms calibration leaves ample
+     * margin within the 2s preamble for the frequency-sequence check. */
     if (rx->startup_quiet < VD_STARTUP_QUIET) {
         rx->noise_floor = (rx->noise_floor * 3U + energy_norm) / 4U;
         rx->startup_quiet++;
@@ -510,10 +490,9 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     switch (rx->state) {
 
     case VD_LISTEN:
-        /* A 10ms window advances by only 5ms, so two hits may contain the
-         * same impulse twice. Require a stable pilot plateau plus one actual
-         * 1500/2400 transition before spending time waiting for sync. */
-        if ((hi || rx->pilot_hits != 0U) && vd_total >= VD_WIN) {
+        /* A long, alternating frequency sequence is the frame detector.
+         * Do not gate it by instantaneous amplitude. */
+        if (rx->startup_quiet >= VD_STARTUP_QUIET && vd_total >= VD_WIN) {
             ring_extract(vd_total - VD_WIN, VD_WIN, vd_work_win);
             float lconf;
             uint8_t ld = VoiceDSP_Classify(vd_work_win, VD_WIN, &lconf, NULL);
@@ -522,19 +501,28 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
                     if (rx->pilot_hits != 0xFFU) rx->pilot_hits++;
                 } else {
                     if (rx->pilot_last != 0xFFU &&
+                        rx->pilot_hits >= VD_PILOT_HITS_REQ &&
                         rx->pilot_trans != 0xFFU) {
                         rx->pilot_trans++;
                     }
                     rx->pilot_last = ld;
                     rx->pilot_hits = 1U;
                 }
+                rx->pilot_gap = 0U;
             } else {
-                rx->pilot_last = 0xFFU;
-                rx->pilot_hits = 0U;
-                rx->pilot_trans = 0U;
+                /* A 10ms window can straddle a 1500/2400 transition. Keep
+                 * the verified sequence briefly, but never bridge a long
+                 * unrelated noise burst into a valid preamble. */
+                if (rx->pilot_gap != 0xFFU) rx->pilot_gap++;
+                if (rx->pilot_gap > VD_PILOT_GAP_MAX) {
+                    rx->pilot_last = 0xFFU;
+                    rx->pilot_hits = 0U;
+                    rx->pilot_trans = 0U;
+                    rx->pilot_gap = 0U;
+                }
             }
             if (rx->pilot_hits >= VD_PILOT_HITS_REQ &&
-                rx->pilot_trans >= 1U) {
+                rx->pilot_trans >= VD_PILOT_TRANS_REQ) {
                 rx->state = VD_PREAMBLE;
                 rx->block_in_pre = 0;
                 rx->sync_hits = 0U;
@@ -543,17 +531,19 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
             rx->pilot_last = 0xFFU;
             rx->pilot_hits = 0U;
             rx->pilot_trans = 0U;
+            rx->pilot_gap = 0U;
         }
         break;
 
     case VD_PREAMBLE: {
         rx->block_in_pre++;
-        if (rx->lo_run > 10U || rx->block_in_pre > VD_PRE_TIMEOUT) {
+        if (rx->block_in_pre > VD_PRE_TIMEOUT) {
             rx->state = VD_LISTEN;
             rx->hi_run = 0U;
             rx->pilot_last = 0xFFU;
             rx->pilot_hits = 0U;
             rx->pilot_trans = 0U;
+            rx->pilot_gap = 0U;
             rx->sync_hits = 0U;
             break;
         }

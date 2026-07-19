@@ -4,7 +4,7 @@
  * @brief          : 4-FSK 发送状态机 (v5, 变长帧 + FEC + 同步音)
   *
   *   帧结构 (与接收端 voice_dsp/voice_fec 严格对应):
-  *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 — 唤醒/导频
+ *     PREAMBLE  : 2000ms, 1500/2400Hz 每 40ms 交替 — 频率序列捕获
   *     SYNC      : 1800Hz 20ms 单音 + 10ms guard — 唯一精定时锚点
   *     DATA      : 变长, 每符号 20ms tone + 10ms guard
   *     DATA TAIL : 30ms DC 隔离槽
@@ -26,7 +26,7 @@
 #define TICKS_TONE           VP_TONE_SAMPLES    /* 320 */
 #define TICKS_GUARD          VP_GUARD_SAMPLES   /* 160 */
 #define TICKS_SLOT           VP_SLOT_SAMPLES    /* 480 */
-#define TICKS_PREAMBLE       ((VP_PREAMBLE_MS  * TICK_FREQ) / 1000)  /* 3200 */
+#define TICKS_PREAMBLE       ((VP_PREAMBLE_MS  * TICK_FREQ) / 1000)
 #define TICKS_POSTAMBLE      ((VP_POSTAMBLE_MS * TICK_FREQ) / 1000)  /* 1920 */
 #define TICKS_PILOT_PERIOD   ((VP_PILOT_PERIOD_MS * TICK_FREQ) / 1000) /* 640 */
 

@@ -71,6 +71,7 @@ typedef struct {
     uint16_t block_in_pre;
     uint8_t  pilot_last;
     uint8_t  pilot_trans;      /* 当前候选中的 1500/2400 切换次数 */
+    uint8_t  pilot_gap;        /* 当前候选中的连续无效窗口数 */
 
     /* 数据栅格自由运行 */
     uint16_t slot_block;       /* 当前槽内块号 0..5 */
