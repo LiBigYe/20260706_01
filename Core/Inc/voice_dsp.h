@@ -61,15 +61,16 @@ typedef struct {
     /* 能量 / 噪声自适应 (一阶差分能量) */
     uint32_t noise_floor;      /* 背景差分能量基线 */
     uint32_t last_energy;
+    uint32_t last_threshold;   /* 最近一次监听活动门限 */
     uint16_t hi_run;           /* 连续 HI 块 */
     uint16_t lo_run;
     uint16_t startup_quiet;    /* 上电静稳块计数 */
 
-    /* 前导导频观察 */
-    uint16_t sample_pos;
+    /* 前导导频观察: pilot_hits 是当前频段的连续 5ms 判决数 */
+    uint8_t  sync_hits;        /* 连续 1800Hz 同步命中数 */
     uint16_t block_in_pre;
     uint8_t  pilot_last;
-    uint8_t  pilot_trans;      /* 1500/2400 交替次数 */
+    uint8_t  pilot_trans;      /* 已确认的 1500/2400 交替次数 */
     uint16_t pre_timeout;
 
     /* 数据栅格自由运行 */
@@ -87,7 +88,7 @@ typedef struct {
     float    data_snr_threshold;
 
     /* 状态跟踪 (频域判决, 不依赖时域能量) */
-    uint8_t  pilot_hits;       /* 前导频域命中计数 */
+    uint8_t  pilot_hits;       /* 当前导频频段的连续命中数 */
     uint8_t  erase_run;        /* 数据段连续擦除计数 */
 
     /* 结果 */

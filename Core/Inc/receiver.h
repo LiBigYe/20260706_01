@@ -105,6 +105,7 @@ uint8_t   RX_IsBusy(void);
 uint8_t   RX_IsFrameActive(void);
 uint32_t  RX_GetNoiseFloor(void);
 uint32_t  RX_GetEnergyThreshold(void);
+uint32_t  RX_GetLastEnergy(void);
 uint8_t   RX_IsDone(void);
 uint8_t   RX_GetState(void);
 uint16_t  RX_GetSymbolCount(void);

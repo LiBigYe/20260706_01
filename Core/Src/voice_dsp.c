@@ -110,25 +110,79 @@ static float bandpass_sample(uint16_t sample)
 }
 
 /* ---- 唤醒活动检测 ----
- * This is deliberately permissive: it only enables the preamble frequency
- * lock.  Carrier validity is decided later by Goertzel SNR and pilot order. */
+ * This only enables the preamble frequency lock.  Fixed gain makes ambient
+ * acoustic energy much less predictable, so require a meaningful excursion
+ * above the learned floor before spending time in PREAMBLE. */
 #define VD_EN_FLOOR_INIT   32U
 #define VD_EN_MARGIN       24U
 #define VD_EN_MIN          32U
-#define VD_STARTUP_QUIET    15U   /* ~75ms 静稳 */
-/* The carrier is accepted by frequency dominance and SNR.  Keep this only as
- * a near-silence guard, so fixed-gain reception is not range-limited by an
- * absolute amplitude threshold. */
-#define VD_CARRIER_MAG2_MIN 100.0f
-#define VD_ACTIVITY_POWER_MIN 16.0f
+#define VD_STARTUP_QUIET    15U   /* ~75ms: still leaves 125ms of preamble */
+/* Pilot and sync must withstand ambient narrowband noise.  The multi-window
+ * data detector keeps its lower gates so this change does not reduce range
+ * after a frame has been acquired. */
+/* Preamble and sync use the same single-window classifier. Keep their
+ * amplitude gates low enough for range; their frequency sequence is the
+ * primary false-trigger protection. */
+#define VD_PILOT_CARRIER_MAG2_MIN 30.0f
+#define VD_PILOT_ACTIVITY_POWER_MIN 5.0f
+/* Once preamble and sync have locked the frame, let frequency dominance and
+ * soft FEC recover weak symbols instead of rejecting them by amplitude. */
+#define VD_DATA_CARRIER_MAG2_MIN 10.0f
+#define VD_DATA_ACTIVITY_POWER_MIN 4.0f
+/* These gates apply only while acquiring a frame. A data symbol may be weak,
+ * but an idle receiver must not wake on a broad or incidental tone. */
+#define VD_PILOT_FREQ_RATIO_MIN  1.45f
 /* When waveform distortion inflates time-domain P_total, a tone may still be
  * unambiguous if its compensated target-bin energy dominates the other tones. */
 #define VD_FREQ_RATIO_MIN   1.35f
+#define VD_FREQ_RATIO_FLOOR 0.01f
 
 /* ---- 前导/同步参数 ---- */
-#define VD_PRE_TIMEOUT     140U     /* 前导内 140 块(700ms) → 放弃 */
-#define VD_MIN_PILOT_TRANS   2U     /* 至少 2 次 1500/2400 交替 */
-#define VD_PILOT_HITS_REQ    2U     /* 频域锁: 连续命中次数 */
+#define VD_PRE_TIMEOUT      50U     /* 候选前导 250ms 内必须见到同步音 */
+#define VD_MIN_PILOT_TRANS   2U     /* 两次交替后才允许锁定同步和数据栅格 */
+#define VD_SYNC_PILOT_HITS_MIN 3U  /* 同步前最后一段导频至少稳定 15ms */
+#define VD_SYNC_HITS_REQ     2U     /* 1800Hz 同步音连续命中次数 */
+/* Two adjacent 5ms classifications reject isolated noise without imposing a
+ * brittle timing window on the 40ms transmitted pilot. */
+#define VD_PILOT_RUN_MIN     2U
+
+static void pilot_sequence_reset(VoiceRx *rx)
+{
+    rx->pilot_last = 0xFFU;
+    rx->pilot_hits = 0U;
+    rx->pilot_trans = 0U;
+}
+
+/* A valid preamble is simply three stable alternating pilot decisions. */
+static void pilot_sequence_observe(VoiceRx *rx, uint8_t digit)
+{
+    if (digit != VP_PILOT_LO && digit != VP_PILOT_HI) {
+        pilot_sequence_reset(rx);
+        return;
+    }
+
+    if (rx->pilot_last == 0xFFU) {
+        rx->pilot_last = digit;
+        rx->pilot_hits = 1U;
+        return;
+    }
+
+    if (digit == rx->pilot_last) {
+        if (rx->pilot_hits != 0xFFU) rx->pilot_hits++;
+        return;
+    }
+
+    if (rx->pilot_hits < VD_PILOT_RUN_MIN) {
+        rx->pilot_last = digit;
+        rx->pilot_hits = 1U;
+        rx->pilot_trans = 0U;
+        return;
+    }
+
+    rx->pilot_last = digit;
+    rx->pilot_hits = 1U;
+    if (rx->pilot_trans != 0xFFU) rx->pilot_trans++;
+}
 
 /* ========================================================================== */
 /*  Goertzel                                                                   */
@@ -143,6 +197,16 @@ static float goertzel_mag2(const float *win, int N, int k, float dc)
         q2 = q1; q1 = q0;
     }
     return q1 * q1 + q2 * q2 - q1 * q2 * coeff;
+}
+
+/* Each 4-FSK channel owns three non-overlapping 100Hz bins. Sum the band
+ * instead of retaining only its largest bin: a small TX/RX clock offset then
+ * remains signal energy rather than being charged to the SNR noise term. */
+static float goertzel_band_mag2(const float *win, int N, int center_k, float dc)
+{
+    return goertzel_mag2(win, N, center_k - 1, dc) +
+           goertzel_mag2(win, N, center_k, dc) +
+           goertzel_mag2(win, N, center_k + 1, dc);
 }
 
 /* ========================================================================== */
@@ -163,21 +227,17 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
         p_total += dev * dev;
     }
 
-    if (p_total < VD_ACTIVITY_POWER_MIN) {
+    if (p_total < VD_PILOT_ACTIVITY_POWER_MIN) {
         if (conf_out) *conf_out = 0.0f;
         if (mag2_out) { for (int i = 0; i < 4; i++) mag2_out[i] = 0.0f; }
         return 0xFFU;
     }
 
-    /* 3. Goertzel ±1 bin, 记录 raw_mag 和 wgt_mag */
+    /* 3. Goertzel 三 bin 频带能量, 记录 raw_mag 和 wgt_mag */
     float raw_mag[4];
     float wgt_mag[4];
     for (int i = 0; i < 4; i++) {
-        float m = goertzel_mag2(win, (int)N, vd_center_k[i], dc);
-        float a = goertzel_mag2(win, (int)N, vd_center_k[i] - 1, dc);
-        float b = goertzel_mag2(win, (int)N, vd_center_k[i] + 1, dc);
-        if (a > m) m = a;
-        if (b > m) m = b;
+        float m = goertzel_band_mag2(win, (int)N, vd_center_k[i], dc);
         raw_mag[i] = m;
         wgt_mag[i] = m * vd_freq_weight[i];
     }
@@ -197,7 +257,8 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
     for (int i = 0; i < 4; i++) {
         if (i != best && wgt_mag[i] > secondv) secondv = wgt_mag[i];
     }
-    float freq_ratio = bestv / (secondv > 1.0f ? secondv : 1.0f);
+    float freq_ratio = bestv / (secondv > VD_FREQ_RATIO_FLOOR ?
+                                secondv : VD_FREQ_RATIO_FLOOR);
 
     /* 5. True SNR */
     float alpha = 2.0f / (float)N;
@@ -208,8 +269,10 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
     if (conf_out) *conf_out = snr;
 
     /* 6. 判决 */
-    if (raw_mag[best] < VD_CARRIER_MAG2_MIN) return 0xFFU;
-    if (snr < VD_SNR_MIN && freq_ratio < VD_FREQ_RATIO_MIN) return 0xFFU;
+    if (raw_mag[best] < VD_PILOT_CARRIER_MAG2_MIN) return 0xFFU;
+    /* Preamble acquisition requires a narrow carrier. Do not let a merely
+     * energetic block bypass its frequency check through wideband SNR. */
+    if (freq_ratio < VD_PILOT_FREQ_RATIO_MIN) return 0xFFU;
 
     return (uint8_t)best;
 }
@@ -245,12 +308,8 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
 
         /* Goertzel 4 频 */
         for (int f = 0; f < 4; f++) {
-            float m = goertzel_mag2(sub, (int)VD_WIN, vd_center_k[f], dc);
-            float a = goertzel_mag2(sub, (int)VD_WIN, vd_center_k[f] - 1, dc);
-            float b = goertzel_mag2(sub, (int)VD_WIN, vd_center_k[f] + 1, dc);
-            if (a > m) m = a;
-            if (b > m) m = b;
-            acc_mag2[f] += m;  /* 累加, 平滑白噪声 */
+            acc_mag2[f] += goertzel_band_mag2(sub, (int)VD_WIN,
+                                               vd_center_k[f], dc);
         }
     }
 
@@ -271,18 +330,19 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
     for (int i = 0; i < 4; i++) {
         if (i != best && wgt[i] > secondv) secondv = wgt[i];
     }
-    float freq_ratio = bestv / (secondv > 1.0f ? secondv : 1.0f);
+    float freq_ratio = bestv / (secondv > VD_FREQ_RATIO_FLOOR ?
+                                secondv : VD_FREQ_RATIO_FLOOR);
 
     /* ── 绝对载波能量 ── */
     if (window_count == 0U ||
-        acc_mag2[best] < VD_CARRIER_MAG2_MIN * (float)window_count) {
+        acc_mag2[best] < VD_DATA_CARRIER_MAG2_MIN * (float)window_count) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
 
     /* The numerator and denominator must cover the same overlapping windows. */
     float alpha = 2.0f / (float)VD_WIN;
-    if (p_total < VD_ACTIVITY_POWER_MIN * (float)window_count) {
+    if (p_total < VD_DATA_ACTIVITY_POWER_MIN * (float)window_count) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
@@ -376,6 +436,7 @@ void VoiceRx_Init(VoiceRx *rx)
     rx->state = VD_LISTEN;
     rx->noise_floor = VD_EN_FLOOR_INIT;
     rx->data_snr_threshold = VD_SNR_MIN;
+    pilot_sequence_reset(rx);
 }
 
 void VoiceRx_Start(VoiceRx *rx)
@@ -390,7 +451,7 @@ void VoiceRx_Start(VoiceRx *rx)
     vd_ring_pos = 0;
     vd_total = 0;
     vd_grid_start = 0;
-    rx->pilot_hits = 0;
+    pilot_sequence_reset(rx);
     rx->erase_run  = 0;
 }
 
@@ -464,19 +525,19 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     uint32_t thr = (rx->noise_floor > 0U ? rx->noise_floor : VD_EN_FLOOR_INIT)
                    + VD_EN_MARGIN;
     if (thr < VD_EN_MIN) thr = VD_EN_MIN;
+    rx->last_threshold = thr;
     uint8_t hi = (energy_norm >= thr) ? 1U : 0U;
 
-    /* A frame may arrive immediately after RX starts.  Let the spectral
-     * pilot lock reject noise instead of learning a valid preamble as noise. */
+    /* Establish a real local floor before permitting the first preamble lock.
+     * The former path stopped learning whenever the initial block exceeded the
+     * placeholder threshold, leaving the floor at 32 and permanently treating
+     * ambient audio as a candidate frame.  A 75ms calibration still leaves
+     * enough of the 200ms preamble for the pilot-transition check. */
     if (rx->startup_quiet < VD_STARTUP_QUIET) {
-        if (hi) {
-            rx->startup_quiet = VD_STARTUP_QUIET;
-        } else {
-            rx->noise_floor = (rx->noise_floor * 7U + energy_norm) / 8U;
-            rx->startup_quiet++;
-            hi = 0U;
-            rx->hi_run = 0U;
-        }
+        rx->noise_floor = (rx->noise_floor * 3U + energy_norm) / 4U;
+        rx->startup_quiet++;
+        hi = 0U;
+        rx->hi_run = 0U;
     } else if (rx->state == VD_LISTEN && !hi) {
         rx->noise_floor = (rx->noise_floor * 15U + energy_norm) / 16U;
     }
@@ -487,30 +548,30 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     switch (rx->state) {
 
     case VD_LISTEN:
-        if (rx->hi_run >= VD_PREAMBLE_MIN_HI && vd_total >= VD_WIN) {
+        /* Energy only wakes the frequency test. Frame acquisition is decided
+         * by the alternating pilot sequence below, not by a long energy run. */
+        if ((hi || rx->pilot_hits != 0U) && vd_total >= VD_WIN) {
             ring_extract(vd_total - VD_WIN, VD_WIN, vd_work_win);
             float lconf;
             uint8_t ld = VoiceDSP_Classify(vd_work_win, VD_WIN, &lconf, NULL);
-            if (ld == VP_PILOT_LO || ld == VP_PILOT_HI) {
-                rx->pilot_hits++;
-                if (rx->pilot_hits >= VD_PILOT_HITS_REQ) {
-                    rx->state = VD_PREAMBLE;
-                    rx->block_in_pre = 0;
-                    rx->pilot_last = ld;
-                    rx->pilot_trans = 0;
-                    rx->pilot_hits = 0;
-                }
-            } else {
-                rx->pilot_hits = 0;
+            pilot_sequence_observe(rx, ld);
+            if (rx->pilot_trans >= VD_MIN_PILOT_TRANS) {
+                rx->state = VD_PREAMBLE;
+                rx->block_in_pre = 0;
+                rx->sync_hits = 0U;
             }
         } else {
-            rx->pilot_hits = 0;
+            pilot_sequence_reset(rx);
         }
         break;
 
     case VD_PREAMBLE: {
         rx->block_in_pre++;
         if (rx->block_in_pre > VD_PRE_TIMEOUT) {
+            /* A full preamble timeout proves that this sustained energy was
+             * not a valid frame.  Raise the floor promptly instead of entering
+             * the same false-preamble loop again. */
+            if (energy_norm > rx->noise_floor) rx->noise_floor = energy_norm;
             rx->state = VD_LISTEN; rx->hi_run = 0; break;
         }
         if (vd_total < VD_WIN) break;
@@ -518,9 +579,14 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
         uint8_t d = VoiceDSP_Classify(vd_work_win, VD_WIN, NULL, NULL);
 
         if (d == VP_PILOT_LO || d == VP_PILOT_HI) {
-            if (rx->pilot_last != 0xFFU && d != rx->pilot_last) rx->pilot_trans++;
-            rx->pilot_last = d;
-        } else if (d == VP_SYNC_DIGIT && rx->pilot_trans >= VD_MIN_PILOT_TRANS) {
+            pilot_sequence_observe(rx, d);
+            rx->sync_hits = 0U;
+        } else if (d == VP_SYNC_DIGIT &&
+                   rx->pilot_trans >= VD_MIN_PILOT_TRANS &&
+                   rx->pilot_hits >= VD_SYNC_PILOT_HITS_MIN) {
+            if (rx->sync_hits != 0xFFU) rx->sync_hits++;
+            if (rx->sync_hits < VD_SYNC_HITS_REQ) break;
+
             /* ── v5.1: 锁定栅格 ── */
             uint32_t tone_start = sync_find_onset(vd_total);
             vd_grid_start = tone_start + VP_SLOT_SAMPLES;
@@ -534,6 +600,8 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
             /* The preamble can be locally reinforced by room reflections.
              * Do not promote that local SNR into a packet-wide requirement. */
             rx->data_snr_threshold = VD_SNR_MIN;
+        } else {
+            rx->sync_hits = 0U;
         }
         break;
     }

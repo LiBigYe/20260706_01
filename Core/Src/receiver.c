@@ -215,7 +215,8 @@ uint8_t RX_IsFrameActive(void)
 }
 
 uint32_t RX_GetNoiseFloor(void)      { return vrx.noise_floor; }
-uint32_t RX_GetEnergyThreshold(void) { return vrx.last_energy; }
+uint32_t RX_GetEnergyThreshold(void) { return vrx.last_threshold; }
+uint32_t RX_GetLastEnergy(void)       { return vrx.last_energy; }
 uint8_t  RX_IsDone(void)             { return rx_done_flag; }
 uint8_t  RX_GetState(void)           { return rx_state; }
 uint16_t RX_GetSymbolCount(void)     { return vrx.sym_count; }
