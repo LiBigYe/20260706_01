@@ -108,7 +108,7 @@ static void rx_update_noise_for_gain(void)
     if (gain > PGA_GAIN_MAX_CODE) return;
 
     if (rx_agc_gain_seen <= PGA_GAIN_MAX_CODE && gain != rx_agc_gain_seen &&
-        vrx.state == VD_LISTEN) {
+        vrx.state != VD_DATA) {
         if (gain > rx_agc_gain_seen) {
             uint8_t steps = gain - rx_agc_gain_seen;
             while (steps-- > 0U && vrx.noise_floor <= (UINT32_MAX / 2U))
@@ -116,6 +116,8 @@ static void rx_update_noise_for_gain(void)
         } else {
             vrx.noise_floor >>= (rx_agc_gain_seen - gain);
         }
+        /* Preamble gain changes are allowed, but a rejected preamble must
+         * return to LISTEN with a noise floor on the current gain scale. */
         vrx.hi_run = 0U;
         vrx.pilot_hits = 0U;
     }
@@ -235,17 +237,14 @@ void RX_ProcessHalfBuffer(const uint16_t *buf)
             PGA112_AGC_Reset();
         } else if (vrx.state == VD_PREAMBLE) {
             PGA112_SetUpdatesFrozen(0U);
-            if (vrx.pilot_trans < VD_AGC_FREEZE_TRANS) {
+            /* Do not amplify a one-tone false lock.  A real preamble must
+             * first demonstrate at least one 1500/2400 transition. */
+            if (vrx.pilot_trans > 0U && vrx.pilot_trans < VD_AGC_FREEZE_TRANS) {
                 PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_LOCKED);
             } else {
                 PGA112_CancelPending();
                 PGA112_AGC_Reset();
             }
-        } else if (vrx.state == VD_LISTEN &&
-                   vrx.hi_run >= VD_PREAMBLE_MIN_HI) {
-            PGA112_SetUpdatesFrozen(0U);
-            /* Candidate energy is enough to pursue, but not yet a validated frame. */
-            PGA112_AGC_Update(sub, RX_ENV_BLOCK_SIZE, PGA112_AGC_ACQUIRE);
         } else if (vrx.state == VD_LISTEN) {
             PGA112_SetUpdatesFrozen(0U);
             if (PGA112_RequestGain(PGA_GAIN_INIT_CODE)) {

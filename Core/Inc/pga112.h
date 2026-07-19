@@ -28,10 +28,11 @@ extern "C" {
 #define AGC_CLIP_LOW          48U
 #define AGC_CLIP_HIGH       4047U
 #define AGC_CLIP_SAMPLES       3U
-#define AGC_VPP_LOW_COUNTS  1120U  /* About 0.9 Vpp at 3.3 V VDDA. */
-#define AGC_VPP_HIGH_COUNTS 2234U  /* About 1.8 Vpp at 3.3 V VDDA. */
+#define AGC_VPP_LOW_COUNTS   640U  /* About 0.5 Vpp at 3.3 V VDDA. */
+#define AGC_VPP_HIGH_COUNTS 1800U  /* About 1.45 Vpp at 3.3 V VDDA. */
 #define AGC_HOLD_BLOCKS        4U  /* Four 5 ms blocks. */
-#define AGC_ACQUIRE_MAX_CODE PGA_GAIN_64X
+#define AGC_ACQUIRE_MAX_CODE PGA_GAIN_32X
+#define AGC_LOCKED_MAX_CODE  PGA_GAIN_64X
 
 #define PGA112_AGC_DISABLED 0U
 #define PGA112_AGC_ACQUIRE  1U

@@ -180,7 +180,7 @@ uint8_t PGA112_AGC_Update(const uint16_t *samples, uint16_t len, uint8_t mode)
         if (agc_up_hold < AGC_HOLD_BLOCKS) agc_up_hold++;
         if (agc_up_hold >= AGC_HOLD_BLOCKS) {
             uint8_t max_gain = (mode == PGA112_AGC_ACQUIRE) ?
-                               AGC_ACQUIRE_MAX_CODE : PGA_GAIN_MAX_CODE;
+                               AGC_ACQUIRE_MAX_CODE : AGC_LOCKED_MAX_CODE;
             agc_up_hold = 0U;
             if (g_pga_gain_live < max_gain) {
                 return PGA112_RequestGain((uint8_t)(g_pga_gain_live + 1U));
