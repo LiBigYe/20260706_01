@@ -33,7 +33,7 @@ uint8_t RX_CharToIndex(char ch)
     case ' ': return 65; case '$': return 66; case '(': return 67;
     case ')': return 68; case '+': return 69; case '-': return 70;
     case '*': return 71; case '/': return 72; case '=': return 73;
-    case '\n': return 74;
+    case '\n': return 74; case ',': return 75;
     default: break;
     }
     return 255;
@@ -49,6 +49,7 @@ char RX_IndexToChar(uint8_t idx)
     case 65: return ' '; case 66: return '$'; case 67: return '(';
     case 68: return ')'; case 69: return '+'; case 70: return '-';
     case 71: return '*'; case 72: return '/'; case 73: return '='; case 74: return '\n';
+    case 75: return ',';
     }
     return '?';
 }

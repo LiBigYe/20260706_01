@@ -17,7 +17,7 @@
   *     符号槽   T_SLOT  = 30 ms = 480 sample
   *
   *  帧结构 (v5, 变长):
-  *     [前导 PREAMBLE]  1500/2400Hz 每 40ms 交替, 共 200ms  (粗能量/AGC/导频)
+ *     [前导 PREAMBLE]  1500/2400Hz 每 40ms 交替, 共 2000ms (频率序列捕获)
   *     [同步 SYNC]      1800Hz 连续 30ms 单音 (1 符号槽)     (精定时锚点)
   *     [长度 LEN]       1 字节 payload 长度 → FEC → 符号
   *     [负载 PAYLOAD]   variable: 3 字节网络头 + N 字节正文 (N = 真实字符数)
@@ -45,7 +45,7 @@ extern "C" {
 #define VP_SLOT_SAMPLES     480U   /* 30ms 符号槽 */
 
 /* ---- 前导/同步/结束 ---- */
-#define VP_PREAMBLE_MS      200U
+#define VP_PREAMBLE_MS     2000U
 #define VP_PILOT_PERIOD_MS   40U   /* 前导交替周期 */
 #define VP_POSTAMBLE_MS     120U
 #define VP_PILOT_LO           0U   /* 1500Hz */
@@ -70,8 +70,8 @@ extern "C" {
  *   LEN 21 + (51+1)*7 = 21 + 364 = 385 符号 → 11.55s 数据. */
 #define VP_MAX_DATA_SYMBOLS (14U + VP_CODED_MAX_BYTES * VP_SYMS_PER_BYTE)  /* 385 */
 
-/* 20s 预算校验: 200ms 前导 + 30ms 同步 + 数据×30ms + 30ms 隔离 + 120ms 结束.
- * 最坏 48 字符: coded=53B → 371 符号 → 11.13s 数据 + 0.38s ≈ 11.5s < 20s. OK.
+/* 20s 预算校验: 2000ms 前导 + 30ms 同步 + 数据×30ms + 30ms 隔离 + 120ms 结束.
+ * 最坏 48 字符: coded=53B → 371 符号 → 11.13s 数据 + 2.18s ≈ 13.31s < 20s. OK.
  * 典型 10 字符: coded=(1+3+10+1)=15B → 105 符号 → 3.15s + 0.35s ≈ 3.5s. */
 
 /* ---- 4-FSK 频率 (Hz), digit 0..3 ---- */

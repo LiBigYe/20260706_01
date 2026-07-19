@@ -52,7 +52,7 @@ extern "C" {
 /*  常量定义                                                                   */
 /* ========================================================================== */
 
-#define FSK4_CHARSET_SIZE    75    /* 字符集大小 (含 '$' 终止符 + \n) */
+#define FSK4_CHARSET_SIZE    76    /* 字符集大小 (含 '$'、逗号和 \n) */
 #define FSK4_SYMBOLS_PER_CHAR 4    /* 每字符 → 4 个 4 进制符号 (base-4) */
 #define FSK4_FREQ_COUNT       4    /* 4 个频率 (0 ~ 3) */
 #define FSK4_MAX_CHARS       48    /* 最大字符数 */

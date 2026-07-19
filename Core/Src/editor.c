@@ -33,13 +33,13 @@
 /* 每个字符串 = 该键在当前模式下的所有字符，按循环顺序排列
  * 修改点：
  *   - key 1: 简化 ".?!" (原 ".,!?'\"@/:;" → 按按键功能定义精简)
- *   - key 0: 英文模式 " " (空格)，数字模式 "0"
+ *   - key 0: 英文模式依次为空格、逗号、换行，数字模式 "0"
  *   - 移除 MODE_SYMBOL (4→3 模式)
  */
 static const char *t9_map[MODE_COUNT][10] = {
     /* MODE_NUMBER */ { "0\n","1",  "2(", "3)", "4+",  "5-", "6", "7*",  "8/", "9="  },
-    /* MODE_LOWER  */ { " \n", ".?!", "abc(", "def)", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz" },
-    /* MODE_UPPER  */ { " \n", ".?!", "ABC(", "DEF)", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ" },
+    /* MODE_LOWER  */ { " ,\n", ".?!", "abc(", "def)", "ghi", "jkl", "mno", "pqrs", "tuv", "wxyz" },
+    /* MODE_UPPER  */ { " ,\n", ".?!", "ABC(", "DEF)", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ" },
 };
 
 static const char *mode_label[MODE_COUNT] = { "123", "abc", "ABC" };

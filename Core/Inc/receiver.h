@@ -38,7 +38,7 @@ extern "C" {
 #define RX_HEADER_SYMBOLS     NET_HEADER_SYMBOLS
 #define RX_MESSAGE_SYMBOLS    (RX_MAX_CHARS * RX_SYMBOLS_PER_CHAR)
 #define RX_TOTAL_SYMBOLS      (RX_HEADER_SYMBOLS + RX_MESSAGE_SYMBOLS + RX_CHECKSUM_SYMBOLS)
-#define RX_CHARSET_SIZE       75  /* 含 '$' 终止符 + \n */
+#define RX_CHARSET_SIZE       76  /* 含 '$'、逗号和 \n */
 #define VISIBLE_ROWS           7
 #define DISP_COLS              21
 

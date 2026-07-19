@@ -84,6 +84,7 @@ uint8_t FSK4_CharToIndex(char ch)
     if (ch == '/')              return 72;
     if (ch == '=')              return 73;
     if (ch == '\n')             return 74;
+    if (ch == ',')              return 75;
     return 255;  /* not in charset */
 }
 
@@ -105,6 +106,7 @@ char FSK4_IndexToChar(uint8_t idx)
     if (idx == 72)      return '/';
     if (idx == 73)      return '=';
     if (idx == 74)      return '\n';
+    if (idx == 75)      return ',';
     return '?';  /* invalid */
 }
 

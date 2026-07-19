@@ -7,7 +7,7 @@ extern "C" {
 
 #include <stdint.h>
 
-#define FSK16_CHARSET_SIZE    75
+#define FSK16_CHARSET_SIZE    76
 #define FSK16_HEX_PER_CHAR    2
 #define FSK16_FREQ_COUNT      16
 #define FSK16_MAX_CHARS       48
