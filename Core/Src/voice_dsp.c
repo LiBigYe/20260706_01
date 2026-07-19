@@ -121,6 +121,9 @@ static float bandpass_sample(uint16_t sample)
  * absolute amplitude threshold. */
 #define VD_CARRIER_MAG2_MIN 100.0f
 #define VD_ACTIVITY_POWER_MIN 16.0f
+/* When waveform distortion inflates time-domain P_total, a tone may still be
+ * unambiguous if its compensated target-bin energy dominates the other tones. */
+#define VD_FREQ_RATIO_MIN   1.35f
 
 /* ---- 前导/同步参数 ---- */
 #define VD_PRE_TIMEOUT     140U     /* 前导内 140 块(700ms) → 放弃 */
@@ -184,12 +187,17 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
         for (int i = 0; i < 4; i++) mag2_out[i] = raw_mag[i];
     }
 
-    /* 4. 找最强 (用加权值) */
+    /* 4. 找最强和次强 (用加权值) */
     int best = 0;
     float bestv = wgt_mag[0];
     for (int i = 1; i < 4; i++) {
         if (wgt_mag[i] > bestv) { bestv = wgt_mag[i]; best = i; }
     }
+    float secondv = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        if (i != best && wgt_mag[i] > secondv) secondv = wgt_mag[i];
+    }
+    float freq_ratio = bestv / (secondv > 1.0f ? secondv : 1.0f);
 
     /* 5. True SNR */
     float alpha = 2.0f / (float)N;
@@ -201,7 +209,7 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
 
     /* 6. 判决 */
     if (raw_mag[best] < VD_CARRIER_MAG2_MIN) return 0xFFU;
-    if (snr < VD_SNR_MIN) return 0xFFU;
+    if (snr < VD_SNR_MIN && freq_ratio < VD_FREQ_RATIO_MIN) return 0xFFU;
 
     return (uint8_t)best;
 }
@@ -251,7 +259,7 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
         for (int i = 0; i < 4; i++) mag2_out[i] = acc_mag2[i];
     }
 
-    /* ── 频响补偿后找最强 ── */
+    /* ── 频响补偿后找最强和次强 ── */
     float wgt[4];
     int best = 0;
     float bestv = 0.0f;
@@ -259,6 +267,11 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
         wgt[i] = acc_mag2[i] * vd_freq_weight[i];
         if (wgt[i] > bestv) { bestv = wgt[i]; best = i; }
     }
+    float secondv = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        if (i != best && wgt[i] > secondv) secondv = wgt[i];
+    }
+    float freq_ratio = bestv / (secondv > 1.0f ? secondv : 1.0f);
 
     /* ── 绝对载波能量 ── */
     if (window_count == 0U ||
@@ -280,8 +293,10 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
     float snr = p_signal / p_noise;
     if (conf_out) *conf_out = snr;
 
-    /* ── 固定门限 ── */
-    if (snr < snr_threshold) return 0xFFU;
+    /* Accept a symbol if either the wideband SNR is sufficient or its target
+     * frequency is clearly dominant.  The latter avoids treating clipping,
+     * quantisation steps, and residual harmonics as data-bearing noise. */
+    if (snr < snr_threshold && freq_ratio < VD_FREQ_RATIO_MIN) return 0xFFU;
 
     return (uint8_t)best;
 }
