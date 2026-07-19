@@ -44,9 +44,10 @@ static const float vd_freq_weight[4] = {1.33f, 1.08f, 1.00f, 1.02f};
 
 /* ---- 唤醒能量门限 ---- */
 #define VD_EN_FLOOR_INIT   400U
-#define VD_EN_MARGIN        500U
-#define VD_EN_MIN           500U
+#define VD_EN_MARGIN        120U
+#define VD_EN_MIN           160U
 #define VD_STARTUP_QUIET    15U   /* ~75ms 静稳 */
+#define VD_CARRIER_MAG2_MIN 10000.0f
 
 /* ---- 前导/同步参数 ---- */
 #define VD_PRE_TIMEOUT     140U     /* 前导内 140 块(700ms) → 放弃 */
@@ -127,7 +128,7 @@ uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N,
     if (conf_out) *conf_out = snr;
 
     /* 6. 判决 */
-    if (raw_mag[best] < 200000.0f) return 0xFFU;
+    if (raw_mag[best] < VD_CARRIER_MAG2_MIN) return 0xFFU;
     if (snr < VD_SNR_MIN) return 0xFFU;
 
     return (uint8_t)best;
@@ -189,7 +190,7 @@ uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
 
     /* ── 绝对载波能量 ── */
     if (window_count == 0U ||
-        acc_mag2[best] < 200000.0f * (float)window_count) {
+        acc_mag2[best] < VD_CARRIER_MAG2_MIN * (float)window_count) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
     }
@@ -381,16 +382,17 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
     if (thr < VD_EN_MIN) thr = VD_EN_MIN;
     uint8_t hi = (energy_norm >= thr) ? 1U : 0U;
 
-    /* ── 静稳标定 ── */
+    /* A frame may arrive immediately after RX starts.  Let the spectral
+     * pilot lock reject noise instead of learning a valid preamble as noise. */
     if (rx->startup_quiet < VD_STARTUP_QUIET) {
-        if (!hi) {
+        if (hi) {
+            rx->startup_quiet = VD_STARTUP_QUIET;
+        } else {
             rx->noise_floor = (rx->noise_floor * 7U + energy_norm) / 8U;
             rx->startup_quiet++;
-        } else {
-            rx->noise_floor = (rx->noise_floor * 3U + energy_norm) / 4U;
-            rx->startup_quiet = VD_STARTUP_QUIET;
+            hi = 0U;
+            rx->hi_run = 0U;
         }
-        hi = 0U; rx->hi_run = 0U;
     } else if (rx->state == VD_LISTEN && !hi) {
         rx->noise_floor = (rx->noise_floor * 15U + energy_norm) / 16U;
     }

@@ -22,6 +22,7 @@
   *     [长度 LEN]       1 字节 payload 长度 → FEC → 符号
   *     [负载 PAYLOAD]   variable: 3 字节网络头 + N 字节正文 (N = 真实字符数)
   *     [校验 CRC]       1 字节 CRC-8 → FEC → 符号
+  *     [尾部隔离槽]     30ms DC 中点
   *     [结束 POSTAMBLE] 2400Hz 连续 120ms
   *
   *  FEC/交织: LEN/PAYLOAD/CRC 全部字节先做 Hamming(7,4) (每字节 → 2 码字 →
@@ -69,8 +70,8 @@ extern "C" {
  *   LEN 21 + (51+1)*7 = 21 + 364 = 385 符号 → 11.55s 数据. */
 #define VP_MAX_DATA_SYMBOLS (14U + VP_CODED_MAX_BYTES * VP_SYMS_PER_BYTE)  /* 385 */
 
-/* 20s 预算校验: 200ms 前导 + 30ms 同步 + 数据×30ms + 120ms 结束.
- * 最坏 48 字符: coded=53B → 371 符号 → 11.13s 数据 + 0.35s ≈ 11.5s < 20s. OK.
+/* 20s 预算校验: 200ms 前导 + 30ms 同步 + 数据×30ms + 30ms 隔离 + 120ms 结束.
+ * 最坏 48 字符: coded=53B → 371 符号 → 11.13s 数据 + 0.38s ≈ 11.5s < 20s. OK.
  * 典型 10 字符: coded=(1+3+10+1)=15B → 105 符号 → 3.15s + 0.35s ≈ 3.5s. */
 
 /* ---- 4-FSK 频率 (Hz), digit 0..3 ---- */

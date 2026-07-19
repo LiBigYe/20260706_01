@@ -7,6 +7,7 @@
   *     PREAMBLE  : 200ms, 1500/2400Hz 每 40ms 交替 — 唤醒/导频
   *     SYNC      : 1800Hz 20ms 单音 + 10ms guard — 唯一精定时锚点
   *     DATA      : 变长, 每符号 20ms tone + 10ms guard
+  *     DATA TAIL : 30ms DC 隔离槽
   *     POSTAMBLE : 120ms 2400Hz 连续音
   *
   *   时序 (16 kHz tick = 62.5us):  tone=320, guard=160, slot=480 ticks.
@@ -34,8 +35,9 @@
 #define ST_PREAMBLE   1
 #define ST_SYNC       2
 #define ST_DATA       3
-#define ST_POSTAMBLE  4
-#define ST_DONE       5
+#define ST_DATA_TAIL  4
+#define ST_POSTAMBLE  5
+#define ST_DONE       6
 
 static uint8_t   tx_state;
 static uint32_t  tx_tick;
@@ -48,8 +50,8 @@ static uint8_t   tx_symbols[VP_MAX_DATA_SYMBOLS];
 
 extern TIM_HandleTypeDef htim3;
 
-static const char *state_names[6] =
-    {"IDLE", "PREAMBLE", "SYNC", "DATA", "POSTAMBLE", "DONE"};
+static const char *state_names[7] =
+    {"IDLE", "PREAMBLE", "SYNC", "DATA", "TAIL", "POSTAMBLE", "DONE"};
 
 static void tx_set_symbol(uint8_t digit) { PWM_DDS_SetFreq(digit); }
 static void tx_guard(void)               { PWM_DDS_OutputMidscale(); }
@@ -126,12 +128,22 @@ void TX_Tick(void)
             tx_slot_tick = 0;
             tx_sym_idx++;
             if (tx_sym_idx >= tx_sym_count) {
-                tx_state = ST_POSTAMBLE;
+                /* Keep the final data window isolated from the continuous
+                 * 2400 Hz postamble when the two audio clocks drift. */
+                tx_state = ST_DATA_TAIL;
                 tx_tick = 0;
-                tx_set_symbol(VP_PILOT_HI);
+                tx_guard();
             } else {
                 tx_set_symbol(tx_symbols[tx_sym_idx]);
             }
+        }
+        break;
+
+    case ST_DATA_TAIL:
+        if (tx_tick >= TICKS_SLOT) {
+            tx_state = ST_POSTAMBLE;
+            tx_tick = 0;
+            tx_set_symbol(VP_PILOT_HI);
         }
         break;
 
@@ -174,7 +186,7 @@ void TX_ClearDone(void)
 
 const char* TX_GetStateName(void)
 {
-    if (tx_state <= 5) return state_names[tx_state];
+    if (tx_state <= ST_DONE) return state_names[tx_state];
     return "?";
 }
 
