@@ -122,7 +122,6 @@ static float bandpass_sample(uint16_t sample)
 #define VD_PILOT_FREQ_RATIO_MIN  1.55f
 /* When waveform distortion inflates time-domain P_total, a tone may still be
  * unambiguous if its compensated target-bin energy dominates the other tones. */
-#define VD_FREQ_RATIO_MIN   1.35f
 #define VD_FREQ_RATIO_FLOOR 1.0e-12f
 
 /* ---- 前导/同步参数 ---- */
@@ -222,7 +221,6 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
 /*  v5.1 多窗口 Goertzel 累加 + 固定 SNR 门限                                 */
 /* ========================================================================== */
 uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
-                               float snr_threshold,
                                float *conf_out, float *mag2_out)
 {
     /* 对 3 个重叠窗口各做 Goertzel, 累加每个频率的 mag² */
@@ -267,13 +265,6 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
         wgt[i] = acc_mag2[i] * vd_freq_weight[i];
         if (wgt[i] > bestv) { bestv = wgt[i]; best = i; }
     }
-    float secondv = 0.0f;
-    for (int i = 0; i < 4; i++) {
-        if (i != best && wgt[i] > secondv) secondv = wgt[i];
-    }
-    float freq_ratio = bestv / (secondv > VD_FREQ_RATIO_FLOOR ?
-                                secondv : VD_FREQ_RATIO_FLOOR);
-
     if (window_count == 0U) {
         if (conf_out) *conf_out = 0.0f;
         return 0xFFU;
@@ -289,11 +280,9 @@ uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
     float snr = p_signal / p_noise;
     if (conf_out) *conf_out = snr;
 
-    /* Accept a symbol if either the wideband SNR is sufficient or its target
-     * frequency is clearly dominant.  The latter avoids treating clipping,
-     * quantisation steps, and residual harmonics as data-bearing noise. */
-    if (snr < snr_threshold && freq_ratio < VD_FREQ_RATIO_MIN) return 0xFFU;
-
+    /* After frame sync, always provide the best frequency hypothesis. Its
+     * relative confidence is carried by mag2_out into the soft FEC decoder;
+     * CRC is the final accept/reject decision for the frame. */
     return (uint8_t)best;
 }
 
@@ -371,7 +360,6 @@ void VoiceRx_Init(VoiceRx *rx)
     bandpass_reset();
     rx->state = VD_LISTEN;
     rx->noise_floor = VD_EN_FLOOR_INIT;
-    rx->data_snr_threshold = VD_SNR_MIN;
     rx->pilot_last = 0xFFU;
     rx->pilot_trans = 0U;
     rx->pilot_gap = 0U;
@@ -383,7 +371,6 @@ void VoiceRx_Start(VoiceRx *rx)
     memset(rx, 0, sizeof(*rx));
     rx->state = VD_LISTEN;
     rx->noise_floor = nf;
-    rx->data_snr_threshold = VD_SNR_MIN;
     memset(vd_ring, 0, sizeof(vd_ring));
     bandpass_reset();
     vd_ring_pos = 0;
@@ -405,7 +392,7 @@ static void data_store_symbol(VoiceRx *rx)
     float conf;
     float mag2[4];
     uint8_t d = VoiceDSP_ClassifyMulti(rx->win_buf, (uint16_t)VD_TONE_SAMPLES,
-                                       rx->data_snr_threshold, &conf, mag2);
+                                       &conf, mag2);
     rx->last_digit = d;
     rx->last_conf  = conf;
 
@@ -565,9 +552,6 @@ uint8_t VoiceRx_PushBlock(VoiceRx *rx, const uint16_t *blk)
             rx->lo_run = 0;
             rx->erase_run = 0;
 
-            /* The preamble can be locally reinforced by room reflections.
-             * Do not promote that local SNR into a packet-wide requirement. */
-            rx->data_snr_threshold = VD_SNR_MIN;
         } else {
             rx->sync_hits = 0U;
         }

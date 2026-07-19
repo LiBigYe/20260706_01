@@ -52,9 +52,6 @@ extern "C" {
 
 #define VD_PREAMBLE_MIN_HI   6U
 
-/* ── v5.1 固定 SNR 门限 ── */
-#define VD_SNR_MIN         2.0f   /* 绝对 SNR 下限 (6dB) */
-
 typedef struct {
     uint8_t  state;
 
@@ -84,9 +81,6 @@ typedef struct {
     /* ── v5.1 软判决: 每符号 4 频 Goertzel mag² ── */
     float    sym_mag2[VP_MAX_DATA_SYMBOLS][4];
 
-    /* 数据段 SNR 门限。当前为 VD_SNR_MIN，字段保留供诊断与将来标定。 */
-    float    data_snr_threshold;
-
     /* 状态跟踪 (频域判决, 不依赖时域能量) */
     uint8_t  pilot_hits;       /* 当前导频频段的连续命中数 */
     uint8_t  erase_run;        /* 数据段连续擦除计数 */
@@ -109,11 +103,8 @@ uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
                           float *conf_out, float *mag2_out);
 
 /* ── v5.1 多窗口分类: 对 tone[0..tone_len-1] 做 3 窗口 Goertzel,
- * 累加 mag², 再做 True SNR + 固定门限判决.
- * snr_threshold 为当前数据段门限.
- * mag2_out[4] 接收累加后的 mag² (供软判决). */
+ * 累加 mag² 并始终返回最佳频点；mag2_out[4] 供软判决 FEC 使用。 */
 uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
-                               float snr_threshold,
                                float *conf_out, float *mag2_out);
 
 /* 一阶差分能量 (高通, 免疫 DC/50Hz) */
