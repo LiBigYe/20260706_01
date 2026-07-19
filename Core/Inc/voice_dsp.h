@@ -1,16 +1,16 @@
 /**
   ******************************************************************************
   * @file           : voice_dsp.h
-  * @brief          : 声语信使 v5.1 接收 DSP 核心 — 多窗口 Goertzel + 自适应 SNR
+ * @brief          : 声语信使 v5.1 接收 DSP 核心 — 多窗口 Goertzel + 固定 SNR
   *
   *  以 80-sample (5ms) 块为单位驱动的接收状态机, 与 STM32 的 DMA
   *  HT/TC 半缓冲拆分完全一致 → 同一份代码即固件代码.
   *
   *  v5.1 关键改进 (2026-07-16):
-  *   (a) 多窗口 Goertzel: 取满 20ms tone (320 samples), 做 3 个重叠窗
+ *   (a) 多窗口 Goertzel: 取满 20ms tone (320 samples), 做 3 个重叠窗
  *       (offset 40/80/120, N=160), 累加 mag² 以平滑判决统计量.
-  *   (b) 自适应 SNR 门限: 前导段累加 SNR 取均值, 数据段门限 =
-  *       max(VD_SNR_MIN, preamble_mean_snr * 0.5). 强信号从严, 弱信号从宽.
+ *   (b) 数据段使用固定的最低 SNR 门限，不让前导段的局部驻波把后续
+ *       符号的判决门限抬高。
   *   (c) 软判决输出: 每符号的 4 频 mag² 存入 sym_mag2[][] 供 voice_fec 做
   *       LLR + Chase 软判决解码.
   *
@@ -52,9 +52,8 @@ extern "C" {
 
 #define VD_PREAMBLE_MIN_HI   6U
 
-/* ── v5.1 自适应 SNR ── */
+/* ── v5.1 固定 SNR 门限 ── */
 #define VD_SNR_MIN         2.0f   /* 绝对 SNR 下限 (6dB) */
-#define VD_SNR_ADAPTIVE_MAX 20.0f /* 自适应门限上限 (13dB), 防止静音噪声地板放大 */
 
 typedef struct {
     uint8_t  state;
@@ -76,7 +75,7 @@ typedef struct {
     /* 数据栅格自由运行 */
     uint16_t slot_block;       /* 当前槽内块号 0..5 */
     uint16_t win_fill;         /* tone 窗已填样本 (0..VD_TONE_SAMPLES) */
-    uint16_t win_buf[VD_TONE_SAMPLES];  /* 完整 20ms tone (v5.1: 320 samples) */
+    float    win_buf[VD_TONE_SAMPLES];  /* 完整 20ms tone (v5.1: 320 samples) */
     uint16_t sym_count;        /* 已解符号数 */
     uint16_t sym_expected;     /* LEN 前缀求得的期望符号数 (0=未知) */
     uint8_t  symbols[VP_MAX_DATA_SYMBOLS];
@@ -84,10 +83,8 @@ typedef struct {
     /* ── v5.1 软判决: 每符号 4 频 Goertzel mag² ── */
     float    sym_mag2[VP_MAX_DATA_SYMBOLS][4];
 
-    /* ── v5.1 自适应 SNR 门限 ── */
-    float    preamble_snr_sum;      /* 前导段 SNR 累加 */
-    uint8_t  preamble_snr_count;   /* 前导段 SNR 采样次数 */
-    float    data_snr_threshold;   /* 数据段 SNR 门限 (动态) */
+    /* 数据段 SNR 门限。当前为 VD_SNR_MIN，字段保留供诊断与将来标定。 */
+    float    data_snr_threshold;
 
     /* 状态跟踪 (频域判决, 不依赖时域能量) */
     uint8_t  pilot_hits;       /* 前导频域命中计数 */
@@ -107,19 +104,19 @@ typedef struct {
  * 返回主频 digit(0..3), 若置信度不足返回 0xFF.
  * conf_out 可为 NULL, mag2_out[4] 可为 NULL.
  * v5.1: mag2_out 输出每个 bin 的原始 mag² (供软判决 FEC). */
-uint8_t VoiceDSP_Classify(const uint16_t *win, uint16_t N,
+uint8_t VoiceDSP_Classify(const float *win, uint16_t N,
                           float *conf_out, float *mag2_out);
 
 /* ── v5.1 多窗口分类: 对 tone[0..tone_len-1] 做 3 窗口 Goertzel,
- * 累加 mag², 再做 True SNR + 自适应门限判决.
+ * 累加 mag², 再做 True SNR + 固定门限判决.
  * snr_threshold 为当前数据段门限.
  * mag2_out[4] 接收累加后的 mag² (供软判决). */
-uint8_t VoiceDSP_ClassifyMulti(const uint16_t *tone, uint16_t tone_len,
+uint8_t VoiceDSP_ClassifyMulti(const float *tone, uint16_t tone_len,
                                float snr_threshold,
                                float *conf_out, float *mag2_out);
 
 /* 一阶差分能量 (高通, 免疫 DC/50Hz) */
-uint32_t VoiceDSP_DiffEnergy(const uint16_t *blk, uint16_t n);
+uint32_t VoiceDSP_DiffEnergy(const float *blk, uint16_t n);
 
 void     VoiceRx_Init(VoiceRx *rx);
 void     VoiceRx_Start(VoiceRx *rx);
