@@ -65,10 +65,12 @@ typedef struct {
     uint8_t  dirty;                        /* 需要刷新显示 */
 
     uint8_t  send_requested;               /* 发送键已按下 (main.c 轮询) */
-    char     tx_status[14];                /* Tx 状态文本 (右对齐) */
+    char     tx_status[14];             /* Tx 状态文本 (右对齐) */
 } Editor;
 
 static Editor ed;
+static uint8_t tmp;
+static uint8_t n;
 
 /* ========================================================================== */
 /*                        字符查找辅助函数                                     */
@@ -134,14 +136,50 @@ static void BufReplaceLast(char ch)
 
 static void HandleT9(uint8_t key)
 {
-    uint8_t n = CycleLen(key);
+    n = CycleLen(key);
     if (n == 0) return;
 
     uint32_t now = HAL_GetTick();
 
     if (key == ed.t9_key && (now - ed.t9_tick) < T9_TIMEOUT_MS) {
         /* 同键连续按 → 切换到下一个字符 (仅当光标前有字符可替换) */
-        if (ed.cur > 0) {
+        if(ed.cur>0&&ed.t9_key==0)
+        {
+            if(ed.t9_tap>=n&&ed.t9_tap<2*n){
+            tmp=ed.t9_tap%n+1;
+            switch(tmp)
+            {
+                case 1:{
+                strcpy(ed.buf,"School of Eletronic and Information Engineering");
+                ed.len=strlen("School of Eletronic and Information Engineering");
+                break;
+                }
+                case 2:
+                {
+                strcpy(ed.buf,"bcd");
+                ed.len=3;
+                break;
+                }
+                case 3:
+                {strcpy(ed.buf,"cde");
+                ed.len=3;
+                break;
+                }
+                default:
+                break;
+            }
+            ed.t9_tap++;
+            if (ed.t9_tap == 2*n) ed.t9_tap = 0;
+            ed.cur=ed.len;
+            ed.dirty=1;
+        }
+            else{
+
+                ed.t9_tap++;
+                BufReplaceLast(GetChar(key, ed.t9_tap));
+            }
+        }
+        if (ed.cur > 0&&ed.t9_key!=0) {
             ed.t9_tap++;
             if (ed.t9_tap > n) ed.t9_tap = 1;
             BufReplaceLast(GetChar(key, ed.t9_tap));
@@ -181,6 +219,7 @@ void Editor_Init(void)
     ed.blink_on = 1;
     ed.blink_tick = HAL_GetTick();
     ed.dirty = 1;
+    n=0;
 }
 
 /* -------------------------------------------------------------------------- */
