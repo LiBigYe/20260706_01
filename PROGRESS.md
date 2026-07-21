@@ -354,3 +354,20 @@ main.c / OLED / 键盘 / 编辑器 / Flash 存储 / 设备编号 / 地址过滤 
 - 1500Hz 判决量×1.25 (“别人1倍、它1.25倍”再比), 同时影响主/次频选择与置信度 ratio.
 - PC 验证: 1500 弱信号稳定解为 digit0; 1800Hz 不会被误偷为 1500; 全链路/仿真/幽灵测试均通过. 实测若仍偏弱可继续上调 vd_freq_weight[0].
 - 三工程 voice_dsp.c 逐字节一致 (01 为 TX 不编译该文件, 无害).
+
+## 2026-07-22 — 算法说明与流程图文档
+
+- **完成**: 编写完整的单片机程序算法说明文档 `ALGORITHM_AND_FLOWCHART.md` (1358行, ~57KB)
+- **内容覆盖**:
+  1. 系统总体架构 — 硬件资源分配表、软件模块分层图
+  2. 半双工顶层状态机 — HM_RX/HM_TX_EDIT/HM_TX_SELECT/HM_TX_BUSY 四状态 + RX 三子模式全转换逻辑 + 外设互斥表
+  3. 发送链路算法 — TX_Start() payload构建、VoiceFEC_BuildDataSymbols编码、TX_Tick() 6状态机(PREAMBLE→SYNC→DATA→TAIL→POSTAMBLE→DONE)、每符号30ms时序
+  4. 接收链路算法 — ADC DMA双缓冲→带通滤波→VoiceRx_PushBlock DSP 4状态机(VD_LISTEN→VD_PREAMBLE→VD_DATA→VD_DONE)→地址过滤→Flash保存
+  5. DSP核心算法 — Goertzel多窗口累加判决(3窗×4频×±1bin)、差分能量抗DC/50Hz、同步音回扫精定时、级联Biquad 1.1-2.8kHz带通滤波、True SNR+频谱占比双门限
+  6. FEC纠错编解码 — Hamming(7,4)编码/解码公式、块交织行列变换、4-FSK符号映射、LEN三重冗余多数表决、LLR对数似然比查表法、Chase软判决、CRC-8(poly 0x07)
+  7. PWM DDS音频合成 — 32-bit相位累加器、1024-pt×10-bit正弦LUT、各频点相位增量计算、TIM1 PWM 48.83kHz载波+RC低通
+  8. 外设驱动与数据流 — ADC DMA双缓冲、TIM3 ISR、4×4键盘扫描去抖、OLED熄屏/唤醒、一键软开关(PB1 EXTI+PB8锁存)
+  9. Flash非易失存储 — PY25Q64HA双副本A/B、镜像CRC32校验、64条消息FIFO
+  10. 7张AI可用的英文流程图生成Prompt — 系统总体/发送链路/接收链路/Goertzel DSP/FEC编解码/半双工状态机/系统数据流图
+- **附录**: 关键常量速查表 (VP_*/VD_*/FLASH_STORE_* 等30+个常量)
+- **用途**: 可直接将第10节各段Prompt交付DALL·E/Midjourney/其他AI绘图工具生成流程图；亦可用Draw.io/Visio/PlantUML手动参照绘制
